@@ -1,0 +1,46 @@
+version: "3.9"
+services:
+  ops:
+    build:
+      context: .
+      dockerfile: ./build/Dockerfile-aarch64-rhel8-om
+    container_name: om-docker-ops
+    deploy:
+      resources:
+        limits:
+          cpus: '2.000'
+          memory: 8G
+        reservations:
+          cpus: '1.000'
+          memory: 4G
+    hostname: ops.om.internal
+    networks:
+      main:
+        aliases:
+          - ops
+          - ops.om.internal
+    privileged: true
+    ports:
+      - "8080:8080"
+      - "25999:25999"
+      - "27171:27017"
+      - "27700-27719:27700-27719"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - mongodb-data:/var/lib/mongo
+      - mms-conf:/opt/mongodb/mms/conf
+      - mms-logs:/opt/mongodb/mms/logs
+      - head-data:/head
+      - filesystem-data:/filesystem
+
+networks:
+  main:
+
+volumes:
+  mongodb-data:
+  mms-conf:
+  mms-logs:
+  head-data:
+  filesystem-data:
+

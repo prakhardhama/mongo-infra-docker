@@ -1,0 +1,65 @@
+FROM registry.access.redhat.com/ubi8/ubi-init
+
+COPY downloads/mongodb-enterprise.x86_64.rpm /root/mongodb-enterprise.x86_64.rpm
+COPY downloads/mongodb-mms.x86_64.rpm /root/mongodb-mms.x86_64.rpm
+
+# Install MongoDB and Ops Manager
+RUN dnf -y install openssh-server iputils hostname cyrus-sasl cyrus-sasl-gssapi cyrus-sasl-plain krb5-libs libcurl lm_sensors-libs net-snmp net-snmp-agent-libs openldap openssl xz-libs && \
+    dnf -y install net-tools && \
+    dnf clean all && \
+    rpm -U /root/mongodb-enterprise.x86_64.rpm && \
+    rpm -U /root/mongodb-mms.x86_64.rpm
+
+# Install mongosh from MongoDB repository
+RUN echo -e "[mongodb-org-8.0]\nname=MongoDB Repository\nbaseurl=https://repo.mongodb.org/yum/redhat/8/mongodb-org/8.0/x86_64/\ngpgcheck=1\nenabled=1\ngpgkey=https://pgp.mongodb.com/server-8.0.asc" > /etc/yum.repos.d/mongodb-org-8.0.repo && \
+    dnf -y install mongodb-mongosh && \
+    dnf clean all
+
+RUN systemctl enable mongod && \
+    systemctl enable mongodb-mms && \
+    systemctl enable sshd && \
+    mkdir -p /head && \
+    chown mongodb-mms:mongodb-mms /head && \
+    mkdir -p /filesystem && \
+    chown mongodb-mms:mongodb-mms /filesystem && \
+    sed -i 's/bindIp: 127.0.0.1/bindIp: 0.0.0.0/' /etc/mongod.conf && \
+    echo "mms.centralUrl=http://ops.om.internal:8080" >> /opt/mongodb/mms/conf/conf-mms.properties && \
+    echo "mms.fromEmailAddr=no@email.com" >> /opt/mongodb/mms/conf/conf-mms.properties && \
+    echo "mms.replyToEmailAddr=no@email.com" >> /opt/mongodb/mms/conf/conf-mms.properties && \
+    echo "mms.adminEmailAddr=no@email.com" >> /opt/mongodb/mms/conf/conf-mms.properties && \
+    echo "mms.mail.transport=smtp" >> /opt/mongodb/mms/conf/conf-mms.properties && \
+    echo "mms.mail.hostname=smtp.om.internal" >> /opt/mongodb/mms/conf/conf-mms.properties && \
+    echo "mms.mail.port=1025" >> /opt/mongodb/mms/conf/conf-mms.properties && \
+    echo "mms.emailDaoClass=SIMPLE_MAILER" >> /opt/mongodb/mms/conf/conf-mms.properties && \
+    echo "mongodb.release.autoDownload=true" >> /opt/mongodb/mms/conf/conf-mms.properties && \
+    echo "mongodb.release.autoDownload.enterprise=true" >> /opt/mongodb/mms/conf/conf-mms.properties && \
+    echo "mongodb.release.modulePreference=enterpriseRequired" >> /opt/mongodb/mms/conf/conf-mms.properties
+
+EXPOSE 8080
+EXPOSE 25999
+EXPOSE 27017
+EXPOSE 27700
+EXPOSE 27701
+EXPOSE 27702
+EXPOSE 27703
+EXPOSE 27704
+EXPOSE 27705
+EXPOSE 27706
+EXPOSE 27707
+EXPOSE 27708
+EXPOSE 27709
+EXPOSE 27710
+EXPOSE 27711
+EXPOSE 27712
+EXPOSE 27713
+EXPOSE 27714
+EXPOSE 27715
+EXPOSE 27716
+EXPOSE 27717
+EXPOSE 27718
+EXPOSE 27719
+
+STOPSIGNAL SIGRTMIN+3
+
+CMD [ "/sbin/init" ]
+
