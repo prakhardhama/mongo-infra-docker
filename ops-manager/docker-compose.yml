@@ -28,6 +28,7 @@ services:
       - "27700-27719:27700-27719"
     volumes:
       - ./certs:/certs
+      - meta-om-appdb-data:/var/lib/mongo
 
   node1:
     build:
@@ -302,3 +303,6 @@ services:
     restart: unless-stopped
 networks:
   main:
+
+volumes:
+  meta-om-appdb-data:

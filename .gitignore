@@ -9,3 +9,5 @@ ops-manager/downloads/*
 !ops-manager/downloads
 .gitignore
 .DS_Store/
+.DS_Store
+/.idea/
