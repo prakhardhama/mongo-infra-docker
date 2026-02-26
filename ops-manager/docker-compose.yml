@@ -25,6 +25,7 @@ services:
       - "8080:8080"
       - "8443:8443"
       - "25999:25999"
+      - "27170:27017"
       - "27700-27719:27700-27719"
     volumes:
       - ./certs:/certs
@@ -77,8 +78,10 @@ services:
     volumes:
       - ./mongodb-mms:/etc/mongodb-mms:ro
       - ./certs:/certs
-    ports: 
+    ports:
       - "27172:27017"
+      - "27173:27018"
+      - "27174:27019"
 
   node3:
     build:

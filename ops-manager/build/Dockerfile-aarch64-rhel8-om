@@ -15,20 +15,23 @@ RUN rm -fr /opt/mongodb/mms/jdk && \
     mkdir -p /opt/mongodb/mms/jdk && \
     tar -xzf /opt/mongodb/mms/jdk.aarch64.tar.gz -C /opt/mongodb/mms/jdk --strip-components=1
 
+# Configure MongoDB to bind to all interfaces (0.0.0.0) for external access
+RUN sed -i 's/bindIp: 127.0.0.1/bindIp: 0.0.0.0/' /etc/mongod.conf
+
 RUN systemctl enable mongod && \
     systemctl enable mongodb-mms && \
     systemctl enable sshd && \
     mkdir -p /head && \
     mkdir -p /filesystem && \
     chown mongodb-mms:mongodb-mms /head && \
-    chown mongodb-mms:mongodb-mms /filesystem && \  
-    echo "mms.centralUrl=http://ops.om.internal:8080" >> /opt/mongodb/mms/conf/conf-mms.properties && \ 
-    echo "mms.fromEmailAddr=no@email.com" >> /opt/mongodb/mms/conf/conf-mms.properties && \ 
-    echo "mms.replyToEmailAddr=no@email.com" >> /opt/mongodb/mms/conf/conf-mms.properties && \ 
-    echo "mms.adminEmailAddr=no@email.com" >> /opt/mongodb/mms/conf/conf-mms.properties && \ 
-    echo "mms.mail.transport=smtp" >> /opt/mongodb/mms/conf/conf-mms.properties && \ 
-    echo "mms.mail.hostname=smtp.om.internal" >> /opt/mongodb/mms/conf/conf-mms.properties && \ 
-    echo "mms.mail.port=1025" >> /opt/mongodb/mms/conf/conf-mms.properties && \ 
+    chown mongodb-mms:mongodb-mms /filesystem && \
+    echo "mms.centralUrl=http://ops.om.internal:8080" >> /opt/mongodb/mms/conf/conf-mms.properties && \
+    echo "mms.fromEmailAddr=no@email.com" >> /opt/mongodb/mms/conf/conf-mms.properties && \
+    echo "mms.replyToEmailAddr=no@email.com" >> /opt/mongodb/mms/conf/conf-mms.properties && \
+    echo "mms.adminEmailAddr=no@email.com" >> /opt/mongodb/mms/conf/conf-mms.properties && \
+    echo "mms.mail.transport=smtp" >> /opt/mongodb/mms/conf/conf-mms.properties && \
+    echo "mms.mail.hostname=smtp.om.internal" >> /opt/mongodb/mms/conf/conf-mms.properties && \
+    echo "mms.mail.port=1025" >> /opt/mongodb/mms/conf/conf-mms.properties && \
     echo "mms.emailDaoClass=SIMPLE_MAILER" >> /opt/mongodb/mms/conf/conf-mms.properties && \
     echo "brs.queryable.pem=/certs/queryable.pem" >> /opt/mongodb/mms/conf/conf-mms.properties && \
     echo "mongodb.release.autoDownload=false" >> /opt/mongodb/mms/conf/conf-mms.properties && \
