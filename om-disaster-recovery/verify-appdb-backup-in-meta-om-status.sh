@@ -8,10 +8,6 @@ PUBLIC_KEY="rhicgwya"
 PRIVATE_KEY="89433b09-e1b1-4651-a71e-d9baba1cfccd"
 META_OM_URL="http://localhost:8080"
 
-# Hardcoded IDs (found via API)
-GROUP_ID="69a13144de116a0d710fa00a"
-CLUSTER_ID="69a94983b1b8f7712012191d"  # appdb-rs (Primary OM AppDB)
-
 # Colors for output
 GREEN='\033[0;32m'
 RED='\033[0;31m'
@@ -21,7 +17,7 @@ NC='\033[0m' # No Color
 
 echo "=== Primary OM AppDB Backup Status Checker ==="
 echo ""
-echo "Checking backup status in Meta OM for: primary-om-appdb"
+echo "Checking backup status in Meta OM for: appdb-rs"
 echo ""
 
 # Function to call Meta OM API
@@ -30,7 +26,87 @@ call_api() {
     curl -s --digest -u "${PUBLIC_KEY}:${PRIVATE_KEY}" "${META_OM_URL}/api/public/v1.0${endpoint}"
 }
 
-echo "1. Verifying Cluster Configuration"
+echo "1. Finding Group (Project)"
+echo "--------------------------"
+ALL_GROUPS=$(call_api "/groups")
+
+# Get the first group (or you can search by name if needed)
+GROUP_ID=$(echo "$ALL_GROUPS" | python3 -c "
+import sys, json
+try:
+    data = json.load(sys.stdin)
+    results = data.get('results', [])
+    if results:
+        # Get the first group
+        print(results[0].get('id', ''))
+    else:
+        print('', file=sys.stderr)
+except Exception as e:
+    print('', file=sys.stderr)
+" 2>/dev/null)
+
+if [ -z "$GROUP_ID" ]; then
+    echo -e "${RED}✗ Could not find any groups${NC}"
+    echo ""
+    echo "Please check:"
+    echo "  1. Meta OM is running"
+    echo "  2. API credentials are correct"
+    echo "  3. User has access to at least one group"
+    exit 1
+fi
+
+GROUP_NAME=$(echo "$ALL_GROUPS" | python3 -c "
+import sys, json
+try:
+    data = json.load(sys.stdin)
+    results = data.get('results', [])
+    if results:
+        print(results[0].get('name', 'N/A'))
+except:
+    print('N/A')
+" 2>/dev/null)
+
+echo -e "${GREEN}✓ Found group: $GROUP_NAME${NC}"
+echo -e "  Group ID: $GROUP_ID"
+echo ""
+
+echo "2. Finding appdb-rs Cluster"
+echo "----------------------------"
+ALL_CLUSTERS=$(call_api "/groups/${GROUP_ID}/clusters")
+
+# Find the cluster ID for appdb-rs
+CLUSTER_ID=$(echo "$ALL_CLUSTERS" | python3 -c "
+import sys, json
+try:
+    data = json.load(sys.stdin)
+    for cluster in data.get('results', []):
+        if cluster.get('replicaSetName') == 'appdb-rs':
+            print(cluster.get('id', ''))
+            break
+except Exception as e:
+    print('', file=sys.stderr)
+" 2>/dev/null)
+
+if [ -z "$CLUSTER_ID" ]; then
+    echo -e "${RED}✗ Could not find cluster with replicaSetName 'appdb-rs'${NC}"
+    echo ""
+    echo "Available clusters:"
+    echo "$ALL_CLUSTERS" | python3 -c "
+import sys, json
+try:
+    data = json.load(sys.stdin)
+    for cluster in data.get('results', []):
+        print(f\"  - {cluster.get('replicaSetName', 'N/A')} (ID: {cluster.get('id', 'N/A')})\")
+except:
+    print('  (Could not parse clusters)')
+" 2>/dev/null
+    exit 1
+fi
+
+echo -e "${GREEN}✓ Found cluster ID: $CLUSTER_ID${NC}"
+echo ""
+
+echo "3. Verifying Cluster Configuration"
 echo "-----------------------------------"
 CLUSTER_INFO=$(call_api "/groups/${GROUP_ID}/clusters/${CLUSTER_ID}")
 
@@ -39,7 +115,7 @@ RS_NAME=$(echo "$CLUSTER_INFO" | python3 -c "import sys, json; data=json.load(sy
 LAST_HEARTBEAT=$(echo "$CLUSTER_INFO" | python3 -c "import sys, json; data=json.load(sys.stdin); print(data.get('lastHeartbeat', 'N/A'))" 2>/dev/null)
 
 if [ "$RS_NAME" = "appdb-rs" ]; then
-    echo -e "${GREEN}✓ Cluster found: $CLUSTER_NAME${NC}"
+    echo -e "${GREEN}✓ Cluster verified: $CLUSTER_NAME${NC}"
     echo -e "  Replica Set: ${BLUE}$RS_NAME${NC}"
     echo -e "  Last Heartbeat: $LAST_HEARTBEAT"
     echo -e "  Cluster ID: $CLUSTER_ID"
@@ -49,7 +125,7 @@ else
 fi
 echo ""
 
-echo "2. Checking Backup Configuration"
+echo "4. Checking Backup Configuration"
 echo "---------------------------------"
 BACKUP_CONFIG=$(call_api "/groups/${GROUP_ID}/clusters/${CLUSTER_ID}/backupConfig")
 
@@ -63,7 +139,7 @@ else
 fi
 echo ""
 
-echo "3. Getting Backup Snapshots"
+echo "5. Getting Backup Snapshots"
 echo "---------------------------"
 SNAPSHOTS=$(call_api "/groups/${GROUP_ID}/clusters/${CLUSTER_ID}/snapshots")
 
@@ -110,7 +186,7 @@ fi
 
 echo ""
 
-echo "4. Checking S3 Blockstore Status"
+echo "6. Checking S3 Blockstore Status"
 echo "---------------------------------"
 # Check daemon logs for S3 blockstore activity
 DAEMON_LOG=$(docker exec ops tail -100 /opt/mongodb/mms/logs/daemon.log 2>/dev/null || echo "")
@@ -135,7 +211,7 @@ fi
 
 echo ""
 
-echo "5. Checking for Backup Errors"
+echo "7. Checking for Backup Errors"
 echo "------------------------------"
 ERRORS=$(docker exec ops grep -i "error\|exception\|failed" /opt/mongodb/mms/logs/daemon.log 2>/dev/null | grep -v "DEBUG" | tail -3 || echo "")
 
@@ -148,7 +224,7 @@ fi
 
 echo ""
 
-echo "6. Checking if Backup is Stuck on WT Checkpoint"
+echo "8. Checking if Backup is Stuck on WT Checkpoint"
 echo "------------------------------------------------"
 # Check for "WT checkpoint" messages
 WT_COUNT=$(docker exec ops grep -c "WT checkpoint" /opt/mongodb/mms/logs/daemon.log 2>/dev/null | head -1 || echo "0")
