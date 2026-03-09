@@ -27,6 +27,8 @@ services:
       - "25999:25999"
       - "27170:27017"
       - "27700-27719:27700-27719"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - ./certs:/certs
       - meta-om-appdb-data:/var/lib/mongo
@@ -50,10 +52,13 @@ services:
         aliases:
           - node1.alt.internal
     privileged: true
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+      - "75c8593e08b3:172.18.0.4"
     volumes:
       - ./mongodb-mms:/etc/mongodb-mms:ro
       - ./certs:/certs
-    ports: 
+    ports:
       - "27171:27017"
 
   node2:

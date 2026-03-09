@@ -4,13 +4,13 @@
 # Uses Meta OM API to check backup configuration and snapshots
 
 # Meta OM API credentials
-PUBLIC_KEY="tokmqzyg"
-PRIVATE_KEY="e534a82c-0ed2-46e0-9590-f5effb0d145c"
+PUBLIC_KEY="rhicgwya"
+PRIVATE_KEY="89433b09-e1b1-4651-a71e-d9baba1cfccd"
 META_OM_URL="http://localhost:8080"
 
 # Hardcoded IDs (found via API)
-GROUP_ID="699d759b5fc1741c180917cb"
-CLUSTER_ID="699d7b5b5fc1741c180938eb"
+GROUP_ID="69a13144de116a0d710fa00a"
+CLUSTER_ID="69a94983b1b8f7712012191d"  # appdb-rs (Primary OM AppDB)
 
 # Colors for output
 GREEN='\033[0;32m'
@@ -38,13 +38,13 @@ CLUSTER_NAME=$(echo "$CLUSTER_INFO" | python3 -c "import sys, json; data=json.lo
 RS_NAME=$(echo "$CLUSTER_INFO" | python3 -c "import sys, json; data=json.load(sys.stdin); print(data.get('replicaSetName', 'N/A'))" 2>/dev/null)
 LAST_HEARTBEAT=$(echo "$CLUSTER_INFO" | python3 -c "import sys, json; data=json.load(sys.stdin); print(data.get('lastHeartbeat', 'N/A'))" 2>/dev/null)
 
-if [ "$CLUSTER_NAME" = "primary-om-appdb" ]; then
+if [ "$RS_NAME" = "appdb-rs" ]; then
     echo -e "${GREEN}✓ Cluster found: $CLUSTER_NAME${NC}"
     echo -e "  Replica Set: ${BLUE}$RS_NAME${NC}"
     echo -e "  Last Heartbeat: $LAST_HEARTBEAT"
     echo -e "  Cluster ID: $CLUSTER_ID"
 else
-    echo -e "${RED}✗ Could not verify cluster${NC}"
+    echo -e "${RED}✗ Could not verify cluster (expected RS: appdb-rs, got: $RS_NAME)${NC}"
     exit 1
 fi
 echo ""
@@ -180,7 +180,7 @@ echo ""
 if [ "$SNAPSHOT_COUNT" -gt 0 ]; then
     echo -e "${GREEN}✅ BACKUP IS WORKING!${NC}"
     echo ""
-    echo "  ✓ Cluster 'primary-om-appdb' is monitored"
+    echo "  ✓ Cluster 'appdb-rs' (Primary OM AppDB) is monitored"
     echo "  ✓ $SNAPSHOT_COUNT backup snapshot(s) exist"
     echo "  ✓ Latest snapshot is complete"
     echo "  ✓ No critical errors detected"

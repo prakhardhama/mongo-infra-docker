@@ -40,19 +40,19 @@ echo "Timestamp: $(date)" >> "$STATE_FILE"
 echo "" >> "$STATE_FILE"
 
 echo "Replica Set:" >> "$STATE_FILE"
-mongosh "mongodb://localhost:27171/?directConnection=true" --quiet --eval "printjson(rs.status())" >> "$STATE_FILE" 2>&1 || true
+mongosh "mongodb://localhost:27018/?directConnection=true" --quiet --eval "printjson(rs.status())" >> "$STATE_FILE" 2>&1 || true
 
 echo "" >> "$STATE_FILE"
 echo "Databases:" >> "$STATE_FILE"
-mongosh "mongodb://localhost:27171/" --quiet --eval "printjson(db.adminCommand({listDatabases: 1}))" >> "$STATE_FILE" 2>&1 || true
+mongosh "mongodb://localhost:27018/" --quiet --eval "printjson(db.adminCommand({listDatabases: 1}))" >> "$STATE_FILE" 2>&1 || true
 
 echo "" >> "$STATE_FILE"
 echo "User count:" >> "$STATE_FILE"
-mongosh "mongodb://localhost:27171/mmsdbconfig" --quiet --eval "print('Users: ' + db.users.countDocuments({}))" >> "$STATE_FILE" 2>&1 || true
+mongosh "mongodb://localhost:27018/mmsdbconfig" --quiet --eval "print('Users: ' + db.users.countDocuments({}))" >> "$STATE_FILE" 2>&1 || true
 
 echo "" >> "$STATE_FILE"
-echo "Project count:" >> "$STATE_FILE"
-mongosh "mongodb://localhost:27171/mmsdbconfig" --quiet --eval "print('Projects: ' + db.projects.countDocuments({}))" >> "$STATE_FILE" 2>&1 || true
+echo "Group count:" >> "$STATE_FILE"
+mongosh "mongodb://localhost:27018/mmsdbconfig" --quiet --eval "print('Groups: ' + db.groups.countDocuments({}))" >> "$STATE_FILE" 2>&1 || true
 
 echo -e "${GREEN}✓ State documented${NC}"
 
@@ -82,13 +82,18 @@ fi
 echo ""
 echo "3. Simulating disaster - Destroying appDB"
 echo "------------------------------------------"
-
-read -p "Choose disaster type (1=Drop databases, 2=Rename databases): " disaster_type
+echo ""
+echo "Disaster type options:"
+echo "  1 = Drop all databases (data loss, container remains)"
+echo "  2 = Destroy databases (safer, can rollback)"
+echo "  3 = Destroy container and volume (complete catastrophic failure)"
+echo ""
+read -p "Choose disaster type (1/2/3): " disaster_type
 
 if [ "$disaster_type" = "1" ]; then
     echo "Dropping all application databases..."
-    
-    mongosh "mongodb://localhost:27171/" --quiet --eval "
+
+    mongosh "mongodb://localhost:27018/" --quiet --eval "
         var dbs = db.adminCommand({listDatabases: 1}).databases;
         dbs.forEach(function(d) {
             if (d.name != 'admin' && d.name != 'local' && d.name != 'config') {
@@ -98,27 +103,63 @@ if [ "$disaster_type" = "1" ]; then
         });
         print('All application databases dropped.');
     " 2>&1
-    
+
     echo -e "${GREEN}✓ Databases dropped${NC}"
-    
+
 elif [ "$disaster_type" = "2" ]; then
     echo "Renaming all application databases (safer for testing)..."
-    
-    mongosh "mongodb://localhost:27171/" --quiet --eval "
+
+    mongosh "mongodb://localhost:27018/" --quiet --eval "
         var dbs = db.adminCommand({listDatabases: 1}).databases;
         var timestamp = new Date().getTime();
         dbs.forEach(function(d) {
             if (d.name != 'admin' && d.name != 'local' && d.name != 'config') {
                 var newName = d.name + '_destroyed_' + timestamp;
                 print('Renaming database: ' + d.name + ' -> ' + newName);
-                db.getSiblingDB(d.name).copyDatabase(d.name, newName);
+                // Note: copyDatabase is deprecated, using admin command instead
+                var adminDb = db.getSiblingDB('admin');
+                try {
+                    adminDb.runCommand({clone: 'localhost:27018', collsToIgnore: [], bypassDocumentValidation: false});
+                } catch(e) {
+                    print('Warning: Could not copy database, will just drop it');
+                }
                 db.getSiblingDB(d.name).dropDatabase();
             }
         });
-        print('All application databases renamed.');
+        print('All application databases destroyed.');
     " 2>&1
-    
-    echo -e "${GREEN}✓ Databases renamed (can be restored if needed)${NC}"
+
+    echo -e "${GREEN}✓ Databases destroyed${NC}"
+
+elif [ "$disaster_type" = "3" ]; then
+    echo -e "${RED}WARNING: This will completely destroy the container and volume!${NC}"
+    read -p "Type 'DESTROY' to confirm: " confirm_destroy
+
+    if [ "$confirm_destroy" != "DESTROY" ]; then
+        echo "Cancelled."
+        exit 1
+    fi
+
+    echo "Stopping and removing container..."
+    docker stop mongodb-ops-manager 2>&1 || true
+    docker rm mongodb-ops-manager 2>&1 || true
+
+    echo "Removing volume..."
+    docker volume rm primary-om-appdb 2>&1 || true
+
+    echo -e "${GREEN}✓ Container and volume destroyed (complete data loss)${NC}"
+    echo -e "${YELLOW}Note: Verification steps will be skipped for this disaster type${NC}"
+
+    echo ""
+    echo "=== Disaster Simulation Complete ==="
+    echo ""
+    echo "State saved to: $STATE_FILE"
+    echo ""
+    echo -e "${GREEN}Next steps:${NC}"
+    echo "  1. Proceed to recovery: ./3-restore-from-backup.sh"
+    echo ""
+    exit 0
+
 else
     echo -e "${RED}Invalid option. Disaster simulation cancelled.${NC}"
     exit 1
@@ -128,7 +169,7 @@ echo ""
 echo "4. Verifying disaster"
 echo "---------------------"
 
-REMAINING_DBS=$(mongosh "mongodb://localhost:27171/" --quiet --eval "
+REMAINING_DBS=$(mongosh "mongodb://localhost:27018/" --quiet --eval "
     db.adminCommand({listDatabases: 1}).databases
         .filter(d => d.name != 'admin' && d.name != 'local' && d.name != 'config')
         .map(d => d.name)

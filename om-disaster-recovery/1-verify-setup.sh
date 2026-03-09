@@ -42,13 +42,13 @@ check "Meta OM accessible on port 8080" "curl -s -o /dev/null -w '%{http_code}' 
 echo ""
 echo "2. Checking MongoDB Services"
 echo "-----------------------------"
-check "Primary OM appDB accessible on 27171" "mongosh 'mongodb://localhost:27171/?directConnection=true' --quiet --eval 'db.adminCommand({ping: 1})' 2>&1 | grep -q 'ok: 1'"
-check "Port forwarder running (27017->27171)" "lsof -i :27017 | grep -q LISTEN"
+check "Primary OM appDB accessible on 27018" "mongosh 'mongodb://localhost:27018/?directConnection=true' --quiet --eval 'db.adminCommand({ping: 1})' 2>&1 | grep -q 'ok: 1'"
+check "Primary OM appDB container running" "docker ps | grep -q 'mongodb-ops-manager'"
 
 echo ""
 echo "3. Checking Replica Set Configuration"
 echo "--------------------------------------"
-RS_NAME=$(mongosh "mongodb://localhost:27171/?directConnection=true" --quiet --eval "rs.status().set" 2>/dev/null || echo "")
+RS_NAME=$(mongosh "mongodb://localhost:27018/?directConnection=true" --quiet --eval "rs.status().set" 2>/dev/null || echo "")
 if [ -n "$RS_NAME" ]; then
     echo -e "Replica Set Name: ${GREEN}$RS_NAME${NC}"
     ((check_passed++))
@@ -57,7 +57,7 @@ else
     ((check_failed++))
 fi
 
-RS_MEMBER=$(mongosh "mongodb://localhost:27171/?directConnection=true" --quiet --eval "rs.status().members[0].name" 2>/dev/null || echo "")
+RS_MEMBER=$(mongosh "mongodb://localhost:27018/?directConnection=true" --quiet --eval "rs.status().members[0].name" 2>/dev/null || echo "")
 if [ -n "$RS_MEMBER" ]; then
     echo -e "Replica Set Member: ${GREEN}$RS_MEMBER${NC}"
     ((check_passed++))
@@ -69,7 +69,7 @@ fi
 echo ""
 echo "4. Checking Primary OM appDB Databases"
 echo "---------------------------------------"
-DBS=$(mongosh "mongodb://localhost:27171/" --quiet --eval "db.adminCommand({listDatabases: 1}).databases.map(d => d.name).join(', ')" 2>/dev/null || echo "")
+DBS=$(mongosh "mongodb://localhost:27018/" --quiet --eval "db.adminCommand({listDatabases: 1}).databases.map(d => d.name).join(', ')" 2>/dev/null || echo "")
 if [ -n "$DBS" ]; then
     echo -e "Databases: ${GREEN}$DBS${NC}"
     ((check_passed++))
@@ -80,11 +80,11 @@ fi
 echo ""
 echo "5. Checking for Test Data"
 echo "-------------------------"
-USER_COUNT=$(mongosh "mongodb://localhost:27171/mmsdbconfig" --quiet --eval "db.users.countDocuments({})" 2>/dev/null || echo "0")
+USER_COUNT=$(mongosh "mongodb://localhost:27018/mmsdbconfig" --quiet --eval "db.users.countDocuments({})" 2>/dev/null || echo "0")
 echo "Users in mmsdbconfig: $USER_COUNT"
 
-PROJECT_COUNT=$(mongosh "mongodb://localhost:27171/mmsdbconfig" --quiet --eval "db.projects.countDocuments({})" 2>/dev/null || echo "0")
-echo "Projects in mmsdbconfig: $PROJECT_COUNT"
+PROJECT_COUNT=$(mongosh "mongodb://localhost:27018/mmsdbconfig" --quiet --eval "db.groups.countDocuments({})" 2>/dev/null || echo "0")
+echo "Groups in mmsdbconfig: $PROJECT_COUNT"
 
 echo ""
 echo "6. Backup Configuration Check"
