@@ -3,9 +3,9 @@
 # Verify backup status for Primary OM AppDB in Meta OM
 # Uses Meta OM API to check backup configuration and snapshots
 
-# Meta OM API credentials
-PUBLIC_KEY="rhicgwya"
-PRIVATE_KEY="89433b09-e1b1-4651-a71e-d9baba1cfccd"
+# Meta OM API credentials (Organization-level API key)
+PUBLIC_KEY="dwiqfoio"
+PRIVATE_KEY="cede56e9-e80c-4e46-9542-f57f32aa1ea0"
 META_OM_URL="http://localhost:8080"
 
 # Colors for output

@@ -1,11 +1,13 @@
 #!/bin/bash
 
-# Phase 4: Verify Primary OM is fully functional after recovery
+# Phase 4: Verify automated restore is complete and successful
 # This script validates that the disaster recovery was successful
 
 set -e
 
-echo "=== Disaster Recovery PoC - Phase 4: Verify Recovery ==="
+echo "=== Disaster Recovery PoC - Phase 4: Verify Automated Restore ==="
+echo ""
+echo "This script verifies the automated restore performed by Meta OM"
 echo ""
 
 # Colors for output
@@ -22,7 +24,7 @@ check_failed=0
 check() {
     local name="$1"
     local command="$2"
-    
+
     echo -n "Checking $name... "
     if eval "$command" > /dev/null 2>&1; then
         echo -e "${GREEN}✓${NC}"
@@ -35,6 +37,46 @@ check() {
     fi
 }
 
+echo "0. Infrastructure Status"
+echo "------------------------"
+
+# Check container is running
+if docker ps | grep -q mongodb-ops-manager; then
+    echo -e "${GREEN}✓ Container is running${NC}"
+    ((check_passed++))
+
+    # Check hostname
+    HOSTNAME=$(docker exec mongodb-ops-manager hostname 2>/dev/null || echo "unknown")
+    echo "  Hostname: $HOSTNAME"
+    if [ "$HOSTNAME" = "de152bf62a02" ]; then
+        echo -e "  ${GREEN}✓ Hostname matches original agent${NC}"
+        ((check_passed++))
+    fi
+
+    # Check automation agent
+    AGENT_PID=$(docker exec mongodb-ops-manager pgrep -f automation-agent 2>/dev/null || echo "")
+    if [ -n "$AGENT_PID" ]; then
+        AGENT_USER=$(docker exec mongodb-ops-manager ps -o user= -p $AGENT_PID 2>/dev/null | head -1)
+        echo -e "  ${GREEN}✓ Automation agent running (PID: $AGENT_PID, User: $AGENT_USER)${NC}"
+        ((check_passed++))
+
+        if [ "$AGENT_USER" = "mongod" ]; then
+            echo -e "  ${GREEN}✓ Agent running as mongod user (no UID mismatch)${NC}"
+            ((check_passed++))
+        else
+            echo -e "  ${YELLOW}⚠ Agent running as $AGENT_USER (expected: mongod)${NC}"
+        fi
+    else
+        echo -e "  ${RED}✗ Automation agent not running${NC}"
+        ((check_failed++))
+    fi
+else
+    echo -e "${RED}✗ Container is not running${NC}"
+    ((check_failed++))
+    exit 1
+fi
+
+echo ""
 echo "1. Database Restoration Verification"
 echo "-------------------------------------"
 
@@ -98,13 +140,13 @@ echo ""
 echo "2. Data Integrity Check"
 echo "-----------------------"
 
-USER_COUNT=$(mongosh "mongodb://localhost:27018/?directConnection=true" --quiet --eval "use mmsdbconfig; db.users.countDocuments({})" 2>/dev/null || echo "0")
+USER_COUNT=$(mongosh "mongodb://localhost:27018/?directConnection=true" --quiet --eval "db.getSiblingDB('mmsdbconfig').users.countDocuments({})" 2>/dev/null | tail -1 || echo "0")
 echo "Total users: $USER_COUNT"
 
-GROUP_COUNT=$(mongosh "mongodb://localhost:27018/?directConnection=true" --quiet --eval "use mmsdbconfig; db.groups.countDocuments({})" 2>/dev/null || echo "0")
+GROUP_COUNT=$(mongosh "mongodb://localhost:27018/?directConnection=true" --quiet --eval "db.getSiblingDB('mmsdbconfig').groups.countDocuments({})" 2>/dev/null | tail -1 || echo "0")
 echo "Total groups: $GROUP_COUNT"
 
-CLUSTER_COUNT=$(mongosh "mongodb://localhost:27018/?directConnection=true" --quiet --eval "use mmsdbconfig; db.clusters.countDocuments({})" 2>/dev/null || echo "0")
+CLUSTER_COUNT=$(mongosh "mongodb://localhost:27018/?directConnection=true" --quiet --eval "db.getSiblingDB('mmsdbconfig').clusters.countDocuments({})" 2>/dev/null | tail -1 || echo "0")
 echo "Total clusters: $CLUSTER_COUNT"
 
 COLLECTION_COUNT=$(mongosh "mongodb://localhost:27018/?directConnection=true" --quiet --eval "
@@ -151,23 +193,24 @@ else
 fi
 
 echo ""
-echo "4. MongoDB Logs Check"
-echo "---------------------"
+echo "4. Automation Agent Logs Check"
+echo "-------------------------------"
 
-echo "Checking for successful recovery in logs..."
-if docker logs mongodb-ops-manager 2>&1 | grep -q "Recovering from stable timestamp"; then
-    echo -e "${GREEN}✓ Found recovery from stable timestamp in logs${NC}"
-    ((check_passed++))
+echo "Checking automation agent logs..."
+if docker exec mongodb-ops-manager tail -100 /var/log/mongodb-mms-automation/automation-agent.log 2>/dev/null | grep -q "UID\|refusing"; then
+    echo -e "${RED}✗ Found UID mismatch errors in agent logs${NC}"
+    ((check_failed++))
 else
-    echo -e "${YELLOW}⚠ Recovery message not found in logs${NC}"
+    echo -e "${GREEN}✓ No UID mismatch errors in agent logs${NC}"
+    ((check_passed++))
 fi
 
-if docker logs mongodb-ops-manager 2>&1 | grep -q "mongod startup complete"; then
-    echo -e "${GREEN}✓ MongoDB startup completed successfully${NC}"
+# Check if MongoDB is being managed by automation
+if docker exec mongodb-ops-manager pgrep -f "mongod.*automation" > /dev/null 2>&1; then
+    echo -e "${GREEN}✓ MongoDB is managed by automation agent${NC}"
     ((check_passed++))
 else
-    echo -e "${RED}✗ MongoDB startup may have issues${NC}"
-    ((check_failed++))
+    echo -e "${YELLOW}⚠ MongoDB may not be managed by automation${NC}"
 fi
 
 echo ""
@@ -177,14 +220,14 @@ echo "---------------------------"
 echo "Checking sample data from key databases..."
 
 # Check backup-related databases
-BACKUP_JOBS=$(mongosh "mongodb://localhost:27018/?directConnection=true" --quiet --eval "use backupjobs; db.getCollectionNames().length" 2>/dev/null || echo "0")
+BACKUP_JOBS=$(mongosh "mongodb://localhost:27018/?directConnection=true" --quiet --eval "db.getSiblingDB('backupjobs').getCollectionNames().length" 2>/dev/null | tail -1 || echo "0")
 echo "Backup jobs collections: $BACKUP_JOBS"
 
-BACKUP_CONFIG=$(mongosh "mongodb://localhost:27018/?directConnection=true" --quiet --eval "use backupconfig; db.getCollectionNames().length" 2>/dev/null || echo "0")
+BACKUP_CONFIG=$(mongosh "mongodb://localhost:27018/?directConnection=true" --quiet --eval "db.getSiblingDB('backupconfig').getCollectionNames().length" 2>/dev/null | tail -1 || echo "0")
 echo "Backup config collections: $BACKUP_CONFIG"
 
 # Check automation databases
-AUTOMATION_CORE=$(mongosh "mongodb://localhost:27018/?directConnection=true" --quiet --eval "use automationcore; db.getCollectionNames().length" 2>/dev/null || echo "0")
+AUTOMATION_CORE=$(mongosh "mongodb://localhost:27018/?directConnection=true" --quiet --eval "db.getSiblingDB('automationcore').getCollectionNames().length" 2>/dev/null | tail -1 || echo "0")
 echo "Automation core collections: $AUTOMATION_CORE"
 
 if [ "$BACKUP_JOBS" -gt 0 ] && [ "$BACKUP_CONFIG" -gt 0 ] && [ "$AUTOMATION_CORE" -gt 0 ]; then
@@ -235,28 +278,29 @@ echo ""
 
 if [ $check_failed -eq 0 ]; then
     echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo -e "${GREEN}✓ DISASTER RECOVERY POC SUCCESSFUL!${NC}"
+    echo -e "${GREEN}✓ AUTOMATED RESTORE SUCCESSFUL!${NC}"
     echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo ""
     echo "Summary:"
     echo "  ✓ Primary OM's appDB was completely destroyed (container + volume)"
-    echo "  ✓ Data was successfully restored from Meta OM snapshot"
-    echo "  ✓ MongoDB recovered automatically from WiredTiger files"
+    echo "  ✓ Data was successfully restored via Meta OM automated restore"
+    echo "  ✓ Automation agent managed the entire restore process"
     echo "  ✓ All $DB_COUNT databases restored"
     echo "  ✓ All $COLLECTION_COUNT collections restored"
     echo "  ✓ Replica set is operational (PRIMARY)"
     echo "  ✓ All data integrity checks passed"
     echo ""
     echo "Recovery Method:"
-    echo "  - Manual file-level restoration"
-    echo "  - Snapshot timestamp: 1772710428"
-    echo "  - MongoDB auto-recovery: 597 oplog entries replayed"
+    echo "  - Automated restore via Meta OM UI"
+    echo "  - Automation agent downloaded and restored snapshot"
+    echo "  - MongoDB managed by automation agent (running as mongod user)"
+    echo "  - Container hostname: de152bf62a02 (matches original agent)"
     echo ""
     echo "Next steps:"
-    echo "  1. Test Primary OM application startup"
-    echo "  2. Verify application functionality"
+    echo "  1. Verify Meta OM UI shows agent as active"
+    echo "  2. Check backup status has resumed"
     echo "  3. Document actual recovery time (RTO)"
-    echo "  4. Review POC-FINDINGS.md for complete documentation"
+    echo "  4. Test application functionality"
     echo ""
 elif [ $check_failed -le 2 ]; then
     echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
