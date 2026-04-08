@@ -22,7 +22,7 @@ NC='\033[0m' # No Color
 
 # Configuration
 CONTAINER_NAME="mongodb-ops-manager"
-CONTAINER_HOSTNAME="de152bf62a02"  # CRITICAL: Must match original hostname for agent reconnection
+CONTAINER_HOSTNAME=""  # Will be fetched from Meta OM automation config (see Step 0)
 VOLUME_NAME="primary-om-appdb"
 EPHEMERAL_PORT="27018"
 REPLICA_SET_NAME="appdb-rs"
@@ -36,6 +36,29 @@ DOCKER_NETWORK="ops-manager_main"
 echo "=== Disaster Recovery PoC - Phase 3: Prepare for Automated Restore ==="
 echo ""
 echo -e "${BLUE}This script prepares the infrastructure for Meta OM automated restore${NC}"
+echo ""
+
+# Step 0: Fetch original hostname from Meta OM automation config
+echo "0. Fetching original hostname for appdb-rs from Meta OM"
+echo "------------------------------"
+CONTAINER_HOSTNAME=$(docker exec node1 cat /var/lib/mongodb-mms-automation/mms-cluster-config-backup.json 2>/dev/null | \
+  python3 -c "
+import sys, json
+data = json.load(sys.stdin)
+for proc in data.get('processes', []):
+    rs = proc.get('args2_6',{}).get('replication',{}).get('replSetName','')
+    if rs == 'appdb-rs':
+        print(proc['hostname'])
+        break
+" 2>/dev/null)
+
+if [ -z "$CONTAINER_HOSTNAME" ]; then
+    echo -e "${RED}✗ Could not determine original hostname for appdb-rs${NC}"
+    echo "  Checked: node1:/var/lib/mongodb-mms-automation/mms-cluster-config-backup.json"
+    echo "  Is the node1 container running with a valid automation config backup?"
+    exit 1
+fi
+echo -e "${GREEN}✓ Found hostname: $CONTAINER_HOSTNAME${NC}"
 echo ""
 
 # Step 1: Stop and remove existing container

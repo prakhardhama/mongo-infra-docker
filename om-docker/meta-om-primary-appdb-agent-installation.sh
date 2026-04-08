@@ -1,10 +1,17 @@
 #!/bin/bash
 set -e  # Exit on error
 
-# Configuration from Meta OM
-AGENT_API_KEY="69a131d9de116a0d710fa0ff30672ffafb86aa8470096267164c5085"
-GROUP_ID="69a13144de116a0d710fa00a"
-MMS_BASE_URL="http://ops.om.internal:8080"
+# Configuration from Meta OM — fetched dynamically from node1's agent config
+GROUP_ID=$(docker exec node1 grep "^mmsGroupId=" /etc/mongodb-mms/automation-agent.config 2>/dev/null | cut -d= -f2)
+AGENT_API_KEY=$(docker exec node1 grep "^mmsApiKey=" /etc/mongodb-mms/automation-agent.config 2>/dev/null | cut -d= -f2)
+MMS_BASE_URL=$(docker exec node1 grep "^mmsBaseUrl=" /etc/mongodb-mms/automation-agent.config 2>/dev/null | cut -d= -f2)
+MMS_BASE_URL="${MMS_BASE_URL:-http://ops.om.internal:8080}"
+
+if [ -z "$GROUP_ID" ] || [ -z "$AGENT_API_KEY" ]; then
+    echo "ERROR: Could not read Meta OM credentials from node1 container"
+    echo "  Is the node1 container running with a valid agent config?"
+    exit 1
+fi
 
 echo "=========================================="
 echo "MongoDB Agent Installation Script"

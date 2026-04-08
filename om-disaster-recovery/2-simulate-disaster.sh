@@ -40,19 +40,19 @@ echo "Timestamp: $(date)" >> "$STATE_FILE"
 echo "" >> "$STATE_FILE"
 
 echo "Replica Set:" >> "$STATE_FILE"
-mongosh "mongodb://localhost:27018/?directConnection=true" --quiet --eval "printjson(rs.status())" >> "$STATE_FILE" 2>&1 || true
+docker exec mongodb-ops-manager mongosh --quiet --eval "printjson(rs.status())" >> "$STATE_FILE" 2>&1 || true
 
 echo "" >> "$STATE_FILE"
 echo "Databases:" >> "$STATE_FILE"
-mongosh "mongodb://localhost:27018/" --quiet --eval "printjson(db.adminCommand({listDatabases: 1}))" >> "$STATE_FILE" 2>&1 || true
+docker exec mongodb-ops-manager mongosh --quiet --eval "printjson(db.adminCommand({listDatabases: 1}))" >> "$STATE_FILE" 2>&1 || true
 
 echo "" >> "$STATE_FILE"
 echo "User count:" >> "$STATE_FILE"
-mongosh "mongodb://localhost:27018/mmsdbconfig" --quiet --eval "print('Users: ' + db.users.countDocuments({}))" >> "$STATE_FILE" 2>&1 || true
+docker exec mongodb-ops-manager mongosh --quiet --eval "print('Users: ' + db.getSiblingDB('mmsdbconfig').users.countDocuments({}))" >> "$STATE_FILE" 2>&1 || true
 
 echo "" >> "$STATE_FILE"
 echo "Group count:" >> "$STATE_FILE"
-mongosh "mongodb://localhost:27018/mmsdbconfig" --quiet --eval "print('Groups: ' + db.groups.countDocuments({}))" >> "$STATE_FILE" 2>&1 || true
+docker exec mongodb-ops-manager mongosh --quiet --eval "print('Groups: ' + db.getSiblingDB('mmsdbconfig').groups.countDocuments({}))" >> "$STATE_FILE" 2>&1 || true
 
 echo -e "${GREEN}✓ State documented${NC}"
 
@@ -93,7 +93,7 @@ read -p "Choose disaster type (1/2/3): " disaster_type
 if [ "$disaster_type" = "1" ]; then
     echo "Dropping all application databases..."
 
-    mongosh "mongodb://localhost:27018/" --quiet --eval "
+    docker exec mongodb-ops-manager mongosh --quiet --eval "
         var dbs = db.adminCommand({listDatabases: 1}).databases;
         dbs.forEach(function(d) {
             if (d.name != 'admin' && d.name != 'local' && d.name != 'config') {
@@ -109,7 +109,7 @@ if [ "$disaster_type" = "1" ]; then
 elif [ "$disaster_type" = "2" ]; then
     echo "Renaming all application databases (safer for testing)..."
 
-    mongosh "mongodb://localhost:27018/" --quiet --eval "
+    docker exec mongodb-ops-manager mongosh --quiet --eval "
         var dbs = db.adminCommand({listDatabases: 1}).databases;
         var timestamp = new Date().getTime();
         dbs.forEach(function(d) {
@@ -169,7 +169,7 @@ echo ""
 echo "4. Verifying disaster"
 echo "---------------------"
 
-REMAINING_DBS=$(mongosh "mongodb://localhost:27018/" --quiet --eval "
+REMAINING_DBS=$(docker exec mongodb-ops-manager mongosh --quiet --eval "
     db.adminCommand({listDatabases: 1}).databases
         .filter(d => d.name != 'admin' && d.name != 'local' && d.name != 'config')
         .map(d => d.name)
