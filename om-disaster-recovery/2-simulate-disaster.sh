@@ -204,6 +204,6 @@ echo "State saved to: $STATE_FILE"
 echo ""
 echo -e "${GREEN}Next steps:${NC}"
 echo "  1. Verify Primary OM cannot function properly (see above)"
-echo "  2. Proceed to recovery: ./3-restore-from-backup.sh"
+echo "  2. Proceed to recovery: ./3-automated-restore-prepare.sh for catastrophic failure"
 echo ""
 

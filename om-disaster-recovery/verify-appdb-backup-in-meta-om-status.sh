@@ -4,9 +4,14 @@
 # Uses Meta OM API to check backup configuration and snapshots
 
 # Meta OM API credentials (Organization-level API key)
-PUBLIC_KEY="dwiqfoio"
-PRIVATE_KEY="cede56e9-e80c-4e46-9542-f57f32aa1ea0"
+PUBLIC_KEY="qyliqonz"
+PRIVATE_KEY="165c22ab-f7e5-4869-9b9c-8811cbb2da1d"
 META_OM_URL="http://localhost:8080"
+
+# Org Key
+#PUBLIC_KEY="sejpjvhi"
+#PRIVATE_KEY="04ff5860-f31f-421d-9687-d0bf36deb3ec"
+#API_ACCESS_LIST="172.18.0.0/16"
 
 # Colors for output
 GREEN='\033[0;32m'
