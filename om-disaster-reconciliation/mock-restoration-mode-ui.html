@@ -1,0 +1,363 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>OM Restoration Mode UI Mock</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #f5f6f7; color: #1a1a2e; }
+
+  /* Sidebar */
+  .sidebar { position: fixed; left: 0; top: 0; bottom: 0; width: 200px; background: #0b1f2f; color: #fff; padding: 16px 0; }
+  .sidebar .logo { padding: 8px 16px 20px; font-weight: 700; font-size: 14px; color: #00ed64; border-bottom: 1px solid #1a3a4a; margin-bottom: 8px; }
+  .sidebar a { display: block; padding: 8px 16px; color: #a0b4c0; text-decoration: none; font-size: 13px; }
+  .sidebar a:hover { background: #132f42; color: #fff; }
+  .sidebar a.active { background: #1a3a4a; color: #00ed64; border-left: 3px solid #00ed64; }
+  .sidebar .section { padding: 12px 16px 4px; font-size: 11px; text-transform: uppercase; color: #5a7a8a; letter-spacing: 0.5px; }
+
+  /* Main */
+  .main { margin-left: 200px; }
+
+  /* Top bar */
+  .topbar { background: #fff; border-bottom: 1px solid #e0e4e8; padding: 12px 24px; display: flex; align-items: center; justify-content: space-between; }
+  .topbar .breadcrumb { font-size: 12px; color: #007dbb; }
+  .topbar h1 { font-size: 22px; font-weight: 600; margin-top: 4px; }
+  .topbar .right { display: flex; gap: 12px; align-items: center; }
+  .topbar .avatar { width: 32px; height: 32px; border-radius: 50%; background: #00684a; color: #fff; display: flex; align-items: center; justify-content: center; font-size: 13px; font-weight: 600; }
+
+  /* Tabs */
+  .tabs { background: #fff; border-bottom: 1px solid #e0e4e8; padding: 0 24px; display: flex; gap: 0; }
+  .tabs a { padding: 12px 16px; font-size: 14px; color: #5c6c75; text-decoration: none; border-bottom: 3px solid transparent; }
+  .tabs a.active { color: #00684a; border-bottom-color: #00684a; font-weight: 600; }
+
+  /* Banner */
+  .banner { margin: 16px 24px 0; padding: 14px 20px; border-radius: 8px; display: flex; align-items: flex-start; gap: 12px; font-size: 14px; line-height: 1.5; }
+  .banner.warning { background: #fef3cd; border: 1px solid #f0c040; }
+  .banner.error { background: #fce4e4; border: 1px solid #e06060; }
+  .banner.success { background: #d4edda; border: 1px solid #80c090; }
+  .banner .icon { font-size: 20px; flex-shrink: 0; margin-top: 1px; }
+  .banner .content { flex: 1; }
+  .banner .title { font-weight: 600; margin-bottom: 2px; }
+  .banner .subtitle { color: #5c6c75; font-size: 13px; }
+  .banner .actions { display: flex; gap: 8px; margin-top: 10px; }
+  .banner .btn { padding: 6px 14px; border-radius: 6px; font-size: 13px; font-weight: 600; cursor: pointer; border: none; }
+  .banner .btn-primary { background: #00684a; color: #fff; }
+  .banner .btn-secondary { background: #fff; color: #333; border: 1px solid #ccc; }
+  .banner .btn-danger { background: #cf4747; color: #fff; }
+  .banner .spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid #b08000; border-top-color: transparent; border-radius: 50%; animation: spin 0.8s linear infinite; margin-right: 6px; vertical-align: middle; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* Content */
+  .content-area { padding: 20px 24px; }
+
+  /* Deployment cards */
+  .deploy-card { background: #fff; border: 1px solid #e0e4e8; border-radius: 8px; margin-bottom: 16px; overflow: hidden; }
+  .deploy-card.disabled { opacity: 0.5; pointer-events: none; }
+  .deploy-card .header { padding: 14px 20px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid #f0f2f4; }
+  .deploy-card .header .name { font-weight: 600; font-size: 15px; }
+  .deploy-card .header .name .type { color: #5c6c75; font-weight: 400; font-size: 13px; margin-left: 8px; }
+  .deploy-card .header .badge { padding: 3px 10px; border-radius: 12px; font-size: 12px; font-weight: 600; }
+  .deploy-card .header .badge.green { background: #d4edda; color: #155724; }
+  .deploy-card .body { padding: 14px 20px; display: flex; gap: 40px; }
+  .deploy-card .body .stat { }
+  .deploy-card .body .stat .label { font-size: 11px; color: #889; text-transform: uppercase; }
+  .deploy-card .body .stat .value { font-size: 14px; font-weight: 500; margin-top: 2px; }
+  .deploy-card .actions-row { padding: 10px 20px; border-top: 1px solid #f0f2f4; display: flex; gap: 8px; justify-content: flex-end; }
+  .deploy-card .actions-row .btn { padding: 5px 12px; font-size: 12px; }
+  .deploy-card .actions-row .btn-disabled { background: #f0f2f4; color: #aaa; cursor: not-allowed; }
+
+  /* Scenario selector */
+  .scenario-selector { margin: 16px 24px; padding: 14px 20px; background: #eef; border: 1px solid #cce; border-radius: 8px; }
+  .scenario-selector h3 { font-size: 14px; margin-bottom: 10px; color: #336; }
+  .scenario-selector label { display: inline-flex; align-items: center; gap: 6px; margin-right: 20px; font-size: 13px; cursor: pointer; padding: 6px 12px; border-radius: 6px; border: 1px solid #cce; background: #fff; }
+  .scenario-selector label:has(input:checked) { background: #00684a; color: #fff; border-color: #00684a; }
+  .scenario-selector input[type="radio"] { display: none; }
+
+  /* Add button */
+  .add-btn-area { display: flex; justify-content: flex-end; padding: 0 24px 12px; }
+  .add-btn { padding: 8px 16px; background: #00684a; color: #fff; border: none; border-radius: 6px; font-size: 13px; font-weight: 600; cursor: pointer; }
+  .add-btn:disabled { background: #ccc; cursor: not-allowed; }
+</style>
+</head>
+<body>
+
+<!-- Sidebar -->
+<div class="sidebar">
+  <div class="logo">MongoDB Ops Manager</div>
+  <div class="section">Project</div>
+  <a class="active" href="#">Deployment</a>
+  <a href="#">Continuous Backup</a>
+  <div class="section">Project</div>
+  <a href="#">Settings</a>
+  <a href="#">Alerts</a>
+  <a href="#">Activity Feed</a>
+  <a href="#">Integrations</a>
+</div>
+
+<!-- Main -->
+<div class="main">
+
+  <!-- Top bar -->
+  <div class="topbar">
+    <div>
+      <div class="breadcrumb">ORGANIZATION 0 &rsaquo; OM BACKUP</div>
+      <h1>Deployment</h1>
+    </div>
+    <div class="right">
+      <div class="avatar">PD</div>
+    </div>
+  </div>
+
+  <!-- Tabs -->
+  <div class="tabs">
+    <a class="active" href="#">Processes</a>
+    <a href="#">Servers</a>
+    <a href="#">Agents</a>
+    <a href="#">Security</a>
+    <a href="#">More</a>
+  </div>
+
+  <!-- Scenario Selector (for demo) -->
+  <div class="scenario-selector">
+    <h3>Mock Scenario (select to preview banner states):</h3>
+    <label><input type="radio" name="scenario" value="normal" checked onchange="setScenario('normal')"> Normal</label>
+    <label><input type="radio" name="scenario" value="draft" onchange="setScenario('draft')"> Unpublished Changes (current behavior)</label>
+    <label><input type="radio" name="scenario" value="reconciling" onchange="setScenario('reconciling')"> Restoration Mode (reconciling)</label>
+    <label><input type="radio" name="scenario" value="failed" onchange="setScenario('failed')"> Restoration Mode (reconciliation failed)</label>
+    <label><input type="radio" name="scenario" value="reconciling_with_draft" onchange="setScenario('reconciling_with_draft')"> Reconciling + Pending Changes</label>
+    <label><input type="radio" name="scenario" value="failed_with_draft" onchange="setScenario('failed_with_draft')"> Failed + Pending Changes</label>
+    <label><input type="radio" name="scenario" value="success" onchange="setScenario('success')"> Reconciliation Complete</label>
+    <label><input type="radio" name="scenario" value="success_with_draft" onchange="setScenario('success_with_draft')"> Complete → Pending Changes Deploy</label>
+  </div>
+
+  <!-- Banner area -->
+  <div id="banner-area"></div>
+
+  <!-- Add button -->
+  <div class="add-btn-area">
+    <button class="add-btn" id="add-btn">+ Add New</button>
+  </div>
+
+  <!-- Deployment cards -->
+  <div class="content-area" id="cards">
+    <div class="deploy-card" id="card-appdb">
+      <div class="header">
+        <div class="name">appdb-rs <span class="type">Replica Set &middot; 1 mongod</span></div>
+        <div class="badge green">7.0.31-ent</div>
+      </div>
+      <div class="body">
+        <div class="stat"><div class="label">Host</div><div class="value">9fb2861bd327:27017</div></div>
+        <div class="stat"><div class="label">Connections</div><div class="value">24</div></div>
+        <div class="stat"><div class="label">Opcounters</div><div class="value">R: 142 &middot; W: 38</div></div>
+      </div>
+      <div class="actions-row">
+        <button class="btn btn-secondary action-btn">Data</button>
+        <button class="btn btn-secondary action-btn">Metrics</button>
+        <button class="btn btn-secondary action-btn">Modify</button>
+      </div>
+    </div>
+
+    <div class="deploy-card" id="card-meta">
+      <div class="header">
+        <div class="name">metaRs <span class="type">Replica Set &middot; 2 mongods</span></div>
+        <div class="badge green">8.0.19-ent</div>
+      </div>
+      <div class="body">
+        <div class="stat"><div class="label">Hosts</div><div class="value">node1:27021, node1:27022</div></div>
+        <div class="stat"><div class="label">Connections</div><div class="value">18</div></div>
+        <div class="stat"><div class="label">Opcounters</div><div class="value">R: 86 &middot; W: 12</div></div>
+      </div>
+      <div class="actions-row">
+        <button class="btn btn-secondary action-btn">Data</button>
+        <button class="btn btn-secondary action-btn">Metrics</button>
+        <button class="btn btn-secondary action-btn">Modify</button>
+      </div>
+    </div>
+
+    <div class="deploy-card" id="card-standalone">
+      <div class="header">
+        <div class="name">node1.om.internal:27020 <span class="type">Standalone &middot; 1 mongod</span></div>
+        <div class="badge green">8.0.19-ent</div>
+      </div>
+      <div class="body">
+        <div class="stat"><div class="label">Host</div><div class="value">node1.om.internal:27020</div></div>
+        <div class="stat"><div class="label">Connections</div><div class="value">3</div></div>
+        <div class="stat"><div class="label">Opcounters</div><div class="value">R: 5 &middot; W: 0</div></div>
+      </div>
+      <div class="actions-row">
+        <button class="btn btn-secondary action-btn">Data</button>
+        <button class="btn btn-secondary action-btn">Metrics</button>
+        <button class="btn btn-secondary action-btn">Modify</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+function setScenario(scenario) {
+  const bannerArea = document.getElementById('banner-area');
+  const addBtn = document.getElementById('add-btn');
+  const actionBtns = document.querySelectorAll('.action-btn');
+  const cards = document.querySelectorAll('.deploy-card');
+
+  // Reset
+  cards.forEach(c => c.classList.remove('disabled'));
+  addBtn.disabled = false;
+  actionBtns.forEach(b => { b.classList.remove('btn-disabled'); b.disabled = false; });
+
+  switch(scenario) {
+    case 'normal':
+      bannerArea.innerHTML = '';
+      break;
+
+    case 'draft':
+      bannerArea.innerHTML = `
+        <div class="banner warning">
+          <div class="content">
+            <div class="title">You have unpublished changes</div>
+            <div class="actions">
+              <button class="btn btn-primary">Review & Deploy</button>
+              <button class="btn btn-secondary">Discard Changes</button>
+            </div>
+          </div>
+        </div>`;
+      break;
+
+    case 'reconciling':
+      bannerArea.innerHTML = `
+        <div class="banner warning">
+          <div class="icon"><span class="spinner"></span></div>
+          <div class="content">
+            <div class="title">Restoration Mode Active</div>
+            <div class="subtitle">
+              Deployment configuration is being reconciled after a restore. Changes are temporarily disabled.<br>
+              Started: Apr 13, 2026 7:00 PM UTC &middot; Reason: PITR Restore &middot; Agent config version: 15 &middot; DB config version: 9
+            </div>
+          </div>
+        </div>`;
+      addBtn.disabled = true;
+      actionBtns.forEach(b => {
+        if (b.textContent === 'Modify') { b.classList.add('btn-disabled'); b.disabled = true; }
+      });
+      break;
+
+    case 'failed':
+      bannerArea.innerHTML = `
+        <div class="banner error">
+          <div class="icon">&#9888;</div>
+          <div class="content">
+            <div class="title">Reconciliation Failed</div>
+            <div class="subtitle">
+              Deployment reconciliation could not complete after 3 attempts. You can retry reconciliation,
+              or accept the current restored configuration (changes made after the restoration point will be lost).
+            </div>
+            <div class="actions">
+              <button class="btn btn-primary" onclick="setScenario('reconciling')">Retry Reconciliation</button>
+              <button class="btn btn-danger" onclick="if(confirm('Accept the restored configuration? Changes made between the last snapshot and the disaster will be lost.')) setScenario('normal')">Accept Current Config</button>
+            </div>
+          </div>
+        </div>`;
+      addBtn.disabled = true;
+      actionBtns.forEach(b => {
+        if (b.textContent === 'Modify') { b.classList.add('btn-disabled'); b.disabled = true; }
+      });
+      break;
+
+    case 'reconciling_with_draft':
+      bannerArea.innerHTML = `
+        <div class="banner warning">
+          <div class="icon"><span class="spinner"></span></div>
+          <div class="content">
+            <div class="title">Restoration Mode Active</div>
+            <div class="subtitle">
+              Deployment configuration is being reconciled after a restore. Changes are temporarily disabled.<br>
+              Started: Apr 13, 2026 7:00 PM UTC &middot; Reason: PITR Restore &middot; Agent config version: 15 &middot; DB config version: 9
+            </div>
+          </div>
+        </div>
+        <div class="banner info" style="background: #e8f0fe; border: 1px solid #a0c4f0;">
+          <div class="icon" style="font-size: 18px;">&#9432;</div>
+          <div class="content" style="display: flex; align-items: center; justify-content: space-between;">
+            <div>
+              <div class="title">Deployment changes are on hold</div>
+              <div class="subtitle">
+                Configuration changes cannot be saved or published while reconciliation is in progress. Please wait for reconciliation to complete before making changes.
+              </div>
+            </div>
+            <button class="btn btn-secondary" style="flex-shrink:0; margin-left: 16px; font-size: 18px; padding: 2px 10px; line-height: 1; color: #888; border: none; background: none; cursor: pointer;" onclick="this.closest('.banner').remove()">&times;</button>
+          </div>
+        </div>`;
+      addBtn.disabled = true;
+      actionBtns.forEach(b => {
+        if (b.textContent === 'Modify') { b.classList.add('btn-disabled'); b.disabled = true; }
+      });
+      break;
+
+    case 'failed_with_draft':
+      bannerArea.innerHTML = `
+        <div class="banner error">
+          <div class="icon">&#9888;</div>
+          <div class="content">
+            <div class="title">Reconciliation Failed</div>
+            <div class="subtitle">
+              Deployment reconciliation could not complete after 3 attempts. You can retry reconciliation,
+              or accept the current restored configuration (changes made after the restoration point will be lost).
+            </div>
+            <div class="actions">
+              <button class="btn btn-primary" onclick="setScenario('reconciling')">Retry Reconciliation</button>
+              <button class="btn btn-danger" onclick="if(confirm('Accept the restored configuration? Changes made between the last snapshot and the disaster will be lost.')) setScenario('normal')">Accept Current Config</button>
+            </div>
+          </div>
+        </div>
+        <div class="banner info" style="background: #e8f0fe; border: 1px solid #a0c4f0;">
+          <div class="icon" style="font-size: 18px;">&#9432;</div>
+          <div class="content" style="display: flex; align-items: center; justify-content: space-between;">
+            <div>
+              <div class="title">Deployment changes are on hold</div>
+              <div class="subtitle">
+                Configuration changes cannot be saved or published until restoration mode is resolved. Retry reconciliation or accept the current config to resume making changes.
+              </div>
+            </div>
+            <button class="btn btn-secondary" style="flex-shrink:0; margin-left: 16px; font-size: 18px; padding: 2px 10px; line-height: 1; color: #888; border: none; background: none; cursor: pointer;" onclick="this.closest('.banner').remove()">&times;</button>
+          </div>
+        </div>`;
+      addBtn.disabled = true;
+      actionBtns.forEach(b => {
+        if (b.textContent === 'Modify') { b.classList.add('btn-disabled'); b.disabled = true; }
+      });
+      break;
+
+    case 'success':
+      bannerArea.innerHTML = `
+        <div class="banner success">
+          <div class="icon">&#10003;</div>
+          <div class="content">
+            <div class="title">Reconciliation Complete</div>
+            <div class="subtitle">
+              Deployment configuration has been successfully reconciled.
+            </div>
+          </div>
+        </div>`;
+      setTimeout(() => { bannerArea.innerHTML = ''; }, 5000);
+      break;
+
+    case 'success_with_draft':
+      bannerArea.innerHTML = `
+        <div class="banner success">
+          <div class="icon">&#10003;</div>
+          <div class="content">
+            <div class="title">Reconciliation Complete</div>
+            <div class="subtitle">
+              Deployment configuration has been successfully reconciled.
+              You can now make deployment changes.
+            </div>
+          </div>
+        </div>`;
+      setTimeout(() => { bannerArea.innerHTML = ''; }, 5000);
+      break;
+  }
+}
+</script>
+</body>
+</html>
