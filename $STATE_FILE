@@ -1,0 +1,16 @@
+{
+  "timestamp": "$TIMESTAMP",
+  "date": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+  "configVersion": 0,
+  "groupId": "$GROUP_ID",
+  "targetReplicaSet": "$TARGET_RS",
+  "targetProcessCount": 0,
+  "targetMemberCount": 0,
+  "targetHostnames": [
+    "$TARGET_HOSTS"
+  ],
+  "allReplicaSets": [
+    "$ALL_RS"
+  ],
+  "totalProcesses": 0
+}

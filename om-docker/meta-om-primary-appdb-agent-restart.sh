@@ -16,6 +16,47 @@ fi
 echo "✓ Container is running"
 echo ""
 
+# Ensure mongod is running (container entrypoint is tail -f /dev/null)
+echo "==> Checking mongod status..."
+if ! docker exec mongodb-ops-manager pgrep -x mongod > /dev/null 2>&1; then
+    echo "⚠️  mongod is not running — starting it..."
+    docker exec -d mongodb-ops-manager mongod \
+        --replSet appdb-rs --bind_ip 0.0.0.0 --port 27017 \
+        --dbpath /data/db --logpath /var/log/mongodb/mongod.log --logappend
+    echo "Waiting for mongod to be ready..."
+    for i in $(seq 1 15); do
+        if docker exec mongodb-ops-manager mongosh --quiet --eval "db.runCommand({ping:1})" > /dev/null 2>&1; then
+            break
+        fi
+        sleep 1
+    done
+    # Verify replica set can elect — reconfig if member host is stale
+    RS_STATE=$(docker exec mongodb-ops-manager mongosh --quiet --eval "rs.status().members[0].stateStr" 2>/dev/null || echo "UNKNOWN")
+    if [ "$RS_STATE" != "PRIMARY" ]; then
+        echo "⚠️  Replica set member not PRIMARY (state: $RS_STATE) — force-reconfiguring..."
+        docker exec mongodb-ops-manager mongosh --quiet --eval "
+            var cfg = rs.conf();
+            cfg.members[0].host = 'localhost:27017';
+            cfg.version = cfg.version + 1;
+            rs.reconfig(cfg, {force: true});
+        "
+        for i in $(seq 1 10); do
+            RS_STATE=$(docker exec mongodb-ops-manager mongosh --quiet --eval "rs.status().members[0].stateStr" 2>/dev/null || echo "UNKNOWN")
+            if [ "$RS_STATE" = "PRIMARY" ]; then break; fi
+            sleep 1
+        done
+    fi
+    if [ "$RS_STATE" = "PRIMARY" ]; then
+        echo "✓ mongod started and replica set is PRIMARY"
+    else
+        echo "❌ ERROR: mongod started but replica set did not reach PRIMARY (state: $RS_STATE)"
+        exit 1
+    fi
+else
+    echo "✓ mongod is already running"
+fi
+echo ""
+
 # Check if agent is already running
 echo "==> Checking agent status..."
 if docker exec mongodb-ops-manager pgrep -f mongodb-mms-automation-agent > /dev/null 2>&1; then

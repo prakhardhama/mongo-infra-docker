@@ -32,6 +32,13 @@ services:
     volumes:
       - ./certs:/certs
       - meta-om-appdb-data:/var/lib/mongo
+      # Persist /etc/mongodb-mms (gen.key + any future MMS config) outside the
+      # writable container layer so a `compose down/up` doesn't lose the key
+      # that decrypts the appdb. Without this, every container recreation
+      # generates a new gen.key and the appdb pre-flight fails:
+      #   "The gen.key file at /etc/mongodb-mms/gen.key does not match the
+      #    gen.key already used for this Ops Manager installation."
+      - ./mongodb-mms-ops:/etc/mongodb-mms
 
   node1:
     build:
