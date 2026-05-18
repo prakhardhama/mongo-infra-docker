@@ -242,4 +242,69 @@ Reproduce the original failure on the existing test setup, then verify the fix p
 
 ## Effort estimate
 
-~4.5 dev days for the implementation, tests, and feature-flag gating. ~1 day for review iteration. ~0.5 day per branch for backport.
+Three layered approaches. Each builds on the previous; this PR's scope is **Approach 1** only. Approaches 2 and 3 are deferred follow-ups (already enumerated in the [Follow-ups](#follow-ups-not-in-this-pr) section above) — the numbers here let us weigh whether to bundle or split.
+
+### Approach 1 — Reactive (this PR)
+
+Synchronous validation at restore-creation time. Rejects the REST POST with HTTP 409 / 503 before the agent ever receives a wipe instruction. The RS data is never touched on a broken snapshot.
+
+| Component | Effort |
+|---|---|
+| `SnapshotBlockValidationSvc` + 2 typed exception classes | ~1 day |
+| Wire into `AutomatedBackupRestoreValidationSvc` + catch chain in `ApiCreateRestoreJobsSvc` | ~0.5 day |
+| 2 new `ApiErrorCode` entries + feature-flag gating | ~0.5 day |
+| Unit tests (svc + extended `AutomatedBackupRestoreValidationSvc` tests) | ~1 day |
+| Integration tests (REST POST → 409 + no `backupRestoreUrl*` directive write) | ~1 day |
+| PR review / iteration | ~1 day |
+| Per-branch backport | ~0.5 day each |
+| **Subtotal** | **~5 dev days** (excluding backports) |
+
+**Trade-offs.** Smallest surface area, easiest to backport, fixes the data-loss bug end-to-end. UI still lists broken snapshots normally — the user discovers the issue only when they click "Restore" and get a 409. No proactive signal in the picker.
+
+---
+
+### Approach 2 — Proactive (Approach 1 + UI marking)
+
+Approach 1 plus a persisted `isRestorable` flag on the snapshot, surfaced in `ApiSnapshotView`. The validation result is written back to `backupjobs.snapshots` whenever the synchronous check runs, so the UI can hide / badge the broken snapshot on the next page load.
+
+| Component (delta over Approach 1) | Effort |
+|---|---|
+| `Snapshot` model: add `isRestorable` + `lastIntegrityCheckedAt` fields | ~0.5 day |
+| `SnapshotDao`: persist the new fields; optional filter for restorable-only listings | ~0.5 day |
+| `ApiSnapshotView`: expose `isRestorable` (default null = unknown, treated as true) | ~0.25 day |
+| `SnapshotBlockValidationSvc`: write result back to AppDB at end of each validation call | ~0.5 day |
+| UI: badge / disable Restore on broken snapshots in the snapshot picker (`SnapshotsPage`, `RestoreModal`) | ~1 day |
+| Tests (DAO, view, UI component, integration) | ~1.5 days |
+| **Delta subtotal** | **~+4 dev days** (cumulative ~9 dev days) |
+
+**Trade-offs.** Users see the broken state proactively without clicking Restore. But the flag is only updated on snapshots that someone has *tried* to restore (or that a fresh check happened to touch) — pre-rollback healthy snapshots are never re-verified, and a snapshot that becomes broken without anyone attempting a restore stays marked restorable until the first try. To catch breakage independently of user action, you need Approach 3.
+
+---
+
+### Approach 3 — Active + scheduled groom (Approach 2 + periodic scan)
+
+Approach 2 plus a daemon-side periodic job that walks every group's `backupjobs.snapshots` and pre-computes the `isRestorable` flag on a regular cadence. The UI is always accurate even for snapshots no one has touched recently; users never see a broken snapshot listed as restorable.
+
+| Component (delta over Approach 2) | Effort |
+|---|---|
+| New daemon-side `SnapshotIntegrityGroomJob` (mirrors `IntegrityCheckJob` but iterates the whole project, calls back into `SnapshotBlockValidationSvc`) | ~1 day |
+| Job scheduling, throttling, in-progress tracking; integration with existing job framework | ~1 day |
+| Metrics + alerts (broken-snapshot rate, last-scan-age per group, validation failure counter) | ~0.5 day |
+| Configurable cadence (default e.g. hourly) + opt-out via app setting | ~0.25 day |
+| Tests (unit + integration with seeded broken snapshots + scheduling) | ~1.5 days |
+| Operational runbook entry (when to expect a broken-snapshot alert, recovery steps) | ~0.25 day |
+| **Delta subtotal** | **~+4.5 dev days** (cumulative ~13.5 dev days) |
+
+**Trade-offs.** Full self-healing UX; the broken-snapshot state is always reflected without any user action. Adds a long-running daemon job that needs ops attention (CPU during scans, alert noise calibration). Largest surface area — also the highest review cost.
+
+---
+
+### Summary
+
+| Approach | Effort | Cumulative | When to ship |
+|---|---|---|---|
+| 1. Reactive | ~5 dev days | ~5 | This PR — addresses the data-loss bug |
+| 2. Proactive (+ UI marking) | +~4 dev days | ~9 | Follow-up PR once Approach 1 is in production for a release |
+| 3. Active + groom job | +~4.5 dev days | ~13.5 | Follow-up after Approach 2; only if customer feedback shows surprise from snapshots silently going stale |
+
+Backport cost is roughly +0.5 day per supported OM minor branch, regardless of approach.
