@@ -308,3 +308,265 @@ Approach 2 plus a daemon-side periodic job that walks every group's `backupjobs.
 | 3. Active + groom job | +~4.5 dev days | ~13.5 | Follow-up after Approach 2; only if customer feedback shows surprise from snapshots silently going stale |
 
 Backport cost is roughly +0.5 day per supported OM minor branch, regardless of approach.
+
+---
+
+## Appendix — Test Run 1 (post-fix validation, 2026-05-19)
+
+Validates the Approach-1 implementation merged in [CLOUDP-405628 / ops-manager#770](https://github.com/10gen/ops-manager/pull/770). Setup mirrors [RESTORE-FINDINGS.md § S1 Run 2](./RESTORE-FINDINGS.md#s1-run-2-2026-05-05--primary-om-kept-running-during-restore) — Primary OM kept running through the entire test.
+
+### Code under test
+
+| Branch | Last commit (HEAD) |
+|---|---|
+| `prakhar.dhama/om-backup-local` (Primary OM build) | `afecc58cd30` |
+| Includes the validation commit | `6529e79f5b7` — *CLOUDP-405628: Validate snapshot blocks before restore* |
+
+OM started with:
+
+```bash
+bazel run --server_env=hosted //server:mms -- \
+  '--jvm_flag=-Dmms.featureFlag.automation.restorationMode=enabled' \
+  2>&1 | tee /tmp/primary-om.log
+```
+
+The `AUTOMATION_RESTORATION_MODE` feature flag must be `enabled` for the new validation to run — otherwise it no-ops and the existing buggy behavior is preserved (covered as Probe 3).
+
+OM start time: **2026-05-19T07:26Z**. Validation classes verified present in `bazel-bin/server/src/main/com/xgen/cloud/brs/restore/_public/svc/libsvc.jar`.
+
+### Baseline (captured 2026-05-19T07:26Z)
+
+Trimmed to the rollback boundary + immediate neighbours. Full inventory at the test time was 20 s3-meta-rs / 20 oplog-meta-rs / 20 poRepSet snapshots; see [list-snapshots.sh](./list-snapshots.sh) for the unabridged dump.
+
+| OM | Replica Set | Created (UTC) | Size | Snapshot ID | Note |
+|---|---|---|---|---|---|
+| Meta OM | s3-meta-rs | 2026-05-19T05:05:59Z | 43.3MB | `6a0bf033…` | pre-target context |
+| Meta OM | s3-meta-rs | 2026-05-19T05:34:09Z | 43.4MB | `6a0bf6bd…` | **← rollback target** |
+| Meta OM | s3-meta-rs | 2026-05-19T06:06:10Z | 43.6MB | `6a0bfe40…` | post-target |
+| Meta OM | s3-meta-rs | 2026-05-19T07:04:11Z | 43.7MB | `6a0c0bd5…` | latest |
+| Primary OM | poRepSet | 2026-05-19T05:08:07Z | 22.5MB | `6a0bf0aa…` | **Probe 1 — healthy (well pre)** |
+| Primary OM | poRepSet | 2026-05-19T05:35:08Z | 22.5MB | `6a0bf705…` | boundary (~1 min post rollback target API time) |
+| Primary OM | poRepSet | 2026-05-19T06:06:09Z | 22.6MB | `6a0bfe17…` | **Probe 2 — broken (clearly post)** |
+| Primary OM | poRepSet | 2026-05-19T06:37:10Z | 22.7MB | `6a0c058d…` | broken (Probe 4 candidate) |
+| Primary OM | poRepSet | 2026-05-19T07:06:11Z | 22.7MB | `6a0c0c51…` | broken (latest pre-test) |
+
+### Rollback target
+
+`s3-meta-rs` snapshot at **2026-05-19T05:34:09Z** (`6a0bf6bd…`). Picked so that:
+
+- `poRepSet` snapshot at 05:08:07Z (`6a0bf0aa…`) is comfortably pre-rollback → Probe 1 expects success.
+- 3 `poRepSet` snapshots post-rollback (06:06, 06:37, 07:06) all have block registrations after the s3-meta checkpoint and will be unreachable → use any of them for Probe 2.
+- The 05:35Z snapshot is a boundary case (within the ~60 s WiredTiger checkpoint buffer); we'll observe but not depend on a specific outcome there.
+
+### Probe plan
+
+Six probes, ordered to leave the RS data intact in all cases (the whole point of the fix). After each, capture the HTTP status, observed agent / log behavior, and whether `automationcore.config.automation` saw a `backupRestoreUrl*` write.
+
+| # | Scenario | Setup | Expected | Outcome |
+|---|---|---|---|---|
+| 1 | **Healthy snapshot restore** | Restore a pre-rollback `poRepSet` snapshot whose blocks were registered before the rollback target | HTTP 200; restore proceeds; ~3 downloads; ~2 min; status FINISHED | ✅ PASS — restore completed in ~2 min 20s (07:37:22 → 07:39:42), validator silently passed |
+| 2 | **Broken snapshot restore** (the load-bearing test) | Restore a post-rollback `poRepSet` snapshot whose blocks are wiped from `backupstore.files` | HTTP 409 `SNAPSHOT_BLOCKS_MISSING`; `automationcore.config.automation` has **no** `backupRestoreUrl*` fields written; mongods stay up; agent log shows **no** `BounceStopIfUpWithForceKill`; RS data intact | ✅ PASS — UI showed validation error immediately at the restore-config step; no restore job created; no agent activity; mongods untouched. Two UX follow-ups raised — see notes. |
+| 3 | **Feature flag off** | Disable `AUTOMATION_RESTORATION_MODE` (restart OM without the JVM flag), retry the broken-snapshot restore | Old buggy behavior preserved: HTTP 200 + agent wipes /data/db + HTTP 500 loop. Proves the flag gates the new path. | ⏭️ SKIPPED — flag-gating verified by code inspection rather than runtime. See note below. |
+| 4 | **s3-meta unreachable** | Re-enable flag, restart OM. Stop `primary-om-s3-meta` container, attempt restore of any snapshot | HTTP 503 `SNAPSHOT_BLOCK_VALIDATION_UNAVAILABLE`; no `backupRestoreUrl*` write; mongods stay up | ✅ PASS — UI banner showed the 503 detail; no agent activity; mongods untouched. ~30 s lag before the banner appears (Mongo driver's default connect timeout) — acceptable for v1 |
+| 5 | **s3-meta restored** | Start `primary-om-s3-meta` container; retry the same broken-snapshot restore from Probe 4 | HTTP 409 `SNAPSHOT_BLOCKS_MISSING` (not 503) — proves the failure-closed path correctly hands off to the failure-confirmed path once integrity can be verified | ✅ PASS — UI banner reverted to the missing-blocks message ("52 of 52 block file(s) are missing"); 503 cleared as expected |
+| 6 | **PITR auto-selects broken starter** (known follow-up) | PITR to a time after the rollback point where the picker auto-selects a broken starter snapshot | Today's fix does NOT cover PITR-from-RS-without-snapshotId — see "Risks / open questions" item 2 above. Expected behavior: same HTTP 500 loop as pre-fix. Documented for follow-up. | ⚠️ KNOWN GAP — reproduced exactly as documented. Validator silently bypassed; daemon picked the broken starter; Phase 1 fired and would have wiped the RS. Restore cancelled via UI before the loop fully ran; healthy 05:08Z snapshot used to recover the RS data. Follow-up Jira required. |
+
+### Observations (filled in as we run)
+
+_Captured live during the test session._
+
+#### Probe 1 — Healthy snapshot restore
+
+Restore submitted **2026-05-19T07:37:22Z** for `poRepSet` snapshot `6a0bf0aabe061546c1b4cb17` (well pre-rollback). RestoreJob id: `6a0c1332be061546c1b580fc`.
+
+Validation pre-flight ran and **passed silently** — no `SNAPSHOT_BLOCKS_MISSING` log, no exception. All 52 fileIds confirmed present in `backupstore.files`. The catch chain in `ApiCreateRestoreJobsSvc` was never hit; the deployment job queued normally.
+
+Two-phase deployment ran end-to-end:
+
+```
+07:37:22  POST /restoreJobs accepted (agent version check passes)
+07:37:26  Phase 0 — parallel-restore manifest computed (3 workers, 5 chunks, ~209 MB chunkSize)
+07:37:57  Phase 0 → Phase 1 transition; pullUrl signed
+07:38:12  Phase 1 started — agent wipes /data/db and begins parallel download
+07:38:42  ...
+07:39:18  finishParallelRestore (all 4 chunks completed across 4 parallel streams)
+07:39:42  Cleaned-up 5 parallel restore chunks — restore complete
+```
+
+Total wall-clock: **~2 min 20s** end-to-end. Matches the pre-fix healthy-restore baseline from [RESTORE-FINDINGS § S1 Run 2 Probe 1](./RESTORE-FINDINGS.md#probe-results) (~2 min, "Finished" with 3 downloads). The new validation adds no measurable latency.
+
+**Outcome:** ✅ As expected. The validator does not regress healthy-snapshot restores.
+
+#### Probe 2 — Broken snapshot restore
+
+Triggered restore in Primary OM UI for `poRepSet` snapshot `6a0bfe17be061546c1b51190` (06:06 AM UTC, all 52 fileIds confirmed wiped from `backupstore.files`).
+
+The validation fired **before any deployment job was queued**. The UI surfaced the error inline at the restore-config step (cluster picker still visible behind the error banner, "RESTORE" button greyed). Error body returned by the API:
+
+```
+Invalid config: Snapshot 6a0bfe17be061546c1b51190 is no longer restorable:
+52 block file(s) are missing from the snapshot store.
+Sample missing fileIds: [6a0bfe17be061546c1b511c3,
+                          6a0bfe17be061546c1b511c2,
+                          6a0bfe17be061546c1b51192,
+                          6a0bfe17be061546c1b51193,
+                          6a0bfe17be061546c1b51194]
+```
+
+Confirmed in the underlying system state:
+
+- **No `automationcore.config.automation` write** for any `poRepSet` member. The agent never received a `backupRestoreUrl*` directive — Phase 1 never fired.
+- **All 3 `poRepSet` mongods stay up**. No `BounceStopIfUpWithForceKill` in any agent log.
+- **No restore job in `backupjobs`**. The catch chain in `ApiCreateRestoreJobsSvc` rejected the request before `BackupRestoreJobSvc.createRestoreJob` could persist anything.
+
+**Outcome:** ✅ PASS — the data-loss bug is fixed. The RS is intact. Compare to the same snapshot pre-fix behavior in [RESTORE-FINDINGS § S1 Run 2 Probe 3/4](./RESTORE-FINDINGS.md#probe-results), where the same broken snapshot wiped `/data/db` and looped 78–186× downloads before manual cancellation.
+
+**UX follow-ups raised during testing** (applied in this iteration before continuing):
+
+1. **Drop the sample fileId list from the API response detail.** Opaque ObjectIds aren't actionable for end users; they belong in the server log for support / debugging only.
+2. **Surface "X of Y missing" instead of just X.** Lets the user distinguish a fully-wiped snapshot (52/52) from a partially-broken one (e.g. 3/52) — partial breakage may still be recoverable via the alternative-RS-restore path documented in RESTORE-FINDINGS § Future scenarios row 7.
+
+Both addressed in commit `795ca83b714` on `prakhar.dhama/CLOUDP-405628-validate-snapshot-blocks`.
+
+**Probe 2 re-verification after the UX commit:**
+
+OM rebuilt + restarted with the fix. Retried the same broken-snapshot restore in the UI. New error banner reads:
+
+```
+Invalid config: Snapshot 6a0bfe17be061546c1b51190 is no longer restorable:
+52 of 52 block file(s) are missing from the snapshot store.
+```
+
+✅ Sample fileIds gone from the API body. ✅ "X of Y" format makes total breakage explicit (52/52 = fully wiped). Server log still carries the sample for support / debugging (`LOG.warn` in `SnapshotBlockValidationSvc`).
+
+#### Probe 3 — Feature flag off
+
+⏭️ **Skipped at session end** — flag-gating verified by code inspection in lieu of a runtime restart-and-rewipe cycle. The validator's first action is:
+
+```java
+if (!FeatureFlagSvc.isFeatureFlagEnabled(
+    FeatureFlag.AUTOMATION_RESTORATION_MODE, _appSettings, null, pTargetGroup)) {
+  return;
+}
+```
+
+— see `AutomatedBackupRestoreValidationSvc.validateSnapshotBlocksReachable`. When the flag is off, the method returns immediately and the catch chain in `ApiCreateRestoreJobsSvc` never sees `SnapshotBlocksMissingException` / `SnapshotBlockValidationUnavailableException`. The pre-existing restore-creation path runs unchanged, preserving the old behavior documented in RESTORE-FINDINGS § S1 Run 2 Probe 3/4.
+
+If we ever want runtime confirmation: stop OM, relaunch without the `-Dmms.featureFlag.automation.restorationMode=enabled` JVM flag, retry the broken-snapshot restore. Expected: HTTP 200, agent wipes `/data/db`, HTTP 500 loop until cancelled. The recovery flow (cancel + healthy-snapshot restore) is the same as Probe 6.
+
+#### Probe 4 — s3-meta unreachable
+
+Stopped the `primary-om-s3-meta` container (`docker stop primary-om-s3-meta` — container exits cleanly, port 27019 stops listening). Triggered a restore of the same broken `poRepSet` snapshot in the Primary OM UI.
+
+Validator's failure-closed path fired exactly as designed:
+
+```
+2026-05-19T08:12:27Z  SvcExceptionHandler — Invalid config: Could not reach
+                      snapshot store to verify block integrity for snapshot
+                      6a0bfe17be061546c1b51190
+  SnapshotBlockValidationUnavailableException
+  Caused by: com.mongodb.MongoTimeoutException: Timed out after 30000 ms
+             while waiting to connect ... ConnectException: Connection refused
+```
+
+Call-stack walk-through:
+
+1. `SnapshotBlockValidationSvc.findMissingFileIds:194` opened a `BlockFileDaoReader` against s3-meta
+2. Mongo driver hit `Connection refused` on `localhost:27019` and waited the default 30 s before throwing `MongoTimeoutException`
+3. `catch (RuntimeException)` at line 209 caught it and wrapped it in `SnapshotBlockValidationUnavailableException`
+4. Bubbled up through `validateSnapshotBlocks` → `validateSnapshotBlocksReachable` → `validateRestoreJob` → caught at `ApiCreateRestoreJobsSvc:177` (our new catch) → mapped to `ApiErrorCode.SNAPSHOT_BLOCK_VALIDATION_UNAVAILABLE` (HTTP 503)
+
+System-state confirmation:
+
+- **Primary OM UI** showed a banner with the user-facing detail `Cannot verify snapshot integrity right now (snapshot store unreachable). Restore refused as a safeguard. Retry once the snapshot store is reachable.`
+- **No `automationcore.config.automation` write** for any `poRepSet` member
+- **All 3 `poRepSet` mongods stay up** — no `BounceStopIfUpWithForceKill`, no agent activity
+- **No restore job persisted** in `backupjobs.restorejobs`
+
+**One UX observation (acknowledged, not pursued in this PR):** the ~30 s wait before the banner appears comes from the default Mongo client connect timeout. Acceptable for v1 — only fires when s3-meta is genuinely unreachable, which is rare. A future tightening could pass a smaller `connectTimeout` for this specific lookup so the banner appears in ~5 s instead.
+
+**Outcome:** ✅ PASS — failure-closed contract holds. The fix prefers refusing a restore over risking a wipe on unverifiable integrity.
+
+#### Probe 5 — s3-meta restored
+
+Started the `primary-om-s3-meta` container back up (`docker start primary-om-s3-meta` → ready within ~3 s). Confirmed `backupstore.files` state was unchanged by the container stop / start cycle (still wiped past the rollback target). One incidental observation: a fresh `poRepSet` snapshot was taken between the s3-meta rollback (Probe 4 setup) and the container restart, and its 52 blocks registered cleanly to s3-meta — consistent with the "[New `poRepSet` snapshots after rollback are immediately healthy](./RESTORE-FINDINGS.md#scenario-1--roll-back-s3-meta-rs-only)" finding from RESTORE-FINDINGS.
+
+Retried the same broken-snapshot restore (`6a0bfe17be061546c1b51190`, 06:06 AM UTC) that Probe 4 had rejected with HTTP 503. The UI banner now reads:
+
+```
+Invalid config: Snapshot 6a0bfe17be061546c1b51190 is no longer restorable:
+52 of 52 block file(s) are missing from the snapshot store.
+```
+
+This is the **409 `SNAPSHOT_BLOCKS_MISSING` path again** (the Probe-2 path), not the 503 path from Probe 4. Confirms two design properties:
+
+1. The **failure-closed path was specifically about reachability**, not the snapshot's block state. The 503 went away as soon as the connection came back.
+2. The validator runs every time — there's no caching that would freeze the result from when s3-meta was down. Each restore-creation re-queries `backupstore.files`.
+
+**Outcome:** ✅ PASS — recovery is symmetric. When s3-meta comes back, the same restore attempt transitions from "can't verify" to "can verify and definitively rejects".
+
+#### Probe 6 — PITR auto-selects broken starter (follow-up scope)
+
+Triggered a Point-in-Time restore to **2026-05-19 06:30 AM UTC** — a target time after the s3-meta rollback boundary, chosen so the daemon's `findSnapshotForPit_v1` would pick the broken 06:06 AM starter (`6a0bfe17be061546c1b51190`).
+
+OM log captured the exact gap:
+
+```
+08:25:04  BackupSvc.findSnapshotForPit_v1 — Finding first snapshot of rsId poRepSet
+                                            older than TS time: Tue May 19 06:30:00 GMT 2026
+08:25:04                                    Found snapshot 6a0bfe17be061546c1b51190
+                                            (the broken 06:06Z one — 1431s before PIT)
+08:25:11  BackupRestoreJobSvc.validateSnapshotRestore — passed (daemon's existing validation)
+08:25:14  Phase 0 started — manifest staging succeeds (reads backupjobs.snapshots only)
+08:25:44  Phase 0 → Phase 1 triggered, pullUrl signed
+08:25:59  Phase 1 started — agent will pick up backupRestoreUrl* directive on next poll
+```
+
+**Crucially: zero `SnapshotBlockValidationSvc` log entries for this restore.** The validator never ran for the PITR-from-RS path. Confirmed in the code at `AutomatedBackupRestoreValidationSvc.validateSnapshotBlocksReachable` — the method's structure only handles two explicit paths:
+
+```java
+if (pRestoreJob.getType() == JobType.RESTORE_CLUSTER) { ... validateClustershotBlocks ... }
+else if (snapshotId != null) { ... validateSnapshotBlocks ... }
+// PITR-from-RS (no snapshotId, not RESTORE_CLUSTER) falls through unchecked
+```
+
+For PITR-from-RS the request goes through `JobType.RESTORE_RS` with no `snapshotId` parameter — the daemon resolves the starter via PIT timestamp lookup (`findSnapshotForPit_v1`). To close this gap, the validator needs to call the **same** resolution function so it validates the snapshot the daemon will ultimately use.
+
+**Recovery flow** (exactly as documented in [RESTORE-FINDINGS § S1 Run 2 Probe 4b](./RESTORE-FINDINGS.md#probe-results)):
+
+1. Restore History → click in-progress restore's Status column → **Cancel Automated Restore** → loop stops, RS data is empty (Phase 1's wipe completed before cancel)
+2. Trigger a fresh restore of the healthy 05:08 AM UTC snapshot (`6a0bf0aabe061546c1b4cb17`) → 3 downloads, ~2 min, RS data fully recovered
+
+**Outcome:** ⚠️ KNOWN GAP — reproduced as designed. The data-loss bug remains for PITR-from-RS until follow-up Jira lands. The fix in this PR covers snapshot-id-based restores (RS + clustershot) and PITR-from-clustershot. Snapshot-id-based RS restore is the most common UI path and is fully protected.
+
+**Follow-up Jira required.** Suggested title: "Extend SnapshotBlockValidationSvc to PITR-from-RS — mirror BackupSvc.findSnapshotForPit_v1 resolution". Estimate ~1 dev day (small refactor in `AutomatedBackupRestoreValidationSvc.validateSnapshotBlocksReachable` plus tests).
+
+### Net result
+
+**Approach-1 ships the fix it was designed to ship.** Snapshot-id-based restores (RS + clustershot) that would have wiped `/data/db` and looped HTTP 500 indefinitely are now rejected at restore-creation time with a clear HTTP 409 message. The replica set data is never modified.
+
+| | Pre-fix (RESTORE-FINDINGS § Scenario 1) | Post-fix (this run) |
+|---|---|---|
+| **Healthy snapshot restore** | ✅ Works | ✅ Works (~2 min, no measurable validator overhead) |
+| **Broken snapshot restore — UI** | ❌ Phase 1 fires → agent wipes `/data/db` → 78–186 HTTP 500 retries → "Finished" or "Cancelled" status, RS empty | ✅ HTTP 409 at restore-creation, banner: "Snapshot %s is no longer restorable: X of Y block file(s) are missing from the snapshot store." No directive write, no wipe, mongods stay up |
+| **Broken snapshot restore — Public API** | ❌ Same wipe + loop pattern | ✅ HTTP 409 `SNAPSHOT_BLOCKS_MISSING` with structured detail (snapshotId, missing-of-total) |
+| **s3-meta unreachable** | (Not surfaced in prior testing — would have been the same wipe + 500 loop) | ✅ HTTP 503 `SNAPSHOT_BLOCK_VALIDATION_UNAVAILABLE` after ~30 s Mongo timeout. Failure-closed safeguards the RS data. |
+| **Recovery after s3-meta back up** | (N/A) | ✅ 503 cleanly transitions to 409 once integrity can be verified again |
+| **PITR-from-RS picking a broken starter** | ❌ Same wipe + 500 loop | ⚠️ **STILL ❌** — known scope gap. Validator falls through unchecked. Follow-up Jira required. |
+
+**One UX iteration mid-session.** Initial error message included a sample of 5 missing fileIds (opaque ObjectIds, not actionable for users). Refined to:
+
+- Drop the sample from the user-facing API detail (kept in `LOG.warn` for support)
+- Show "X of Y missing" instead of just X (lets the user tell a fully-wiped snapshot from a partial breakage)
+
+Shipped as commit `795ca83b714` on `prakhar.dhama/CLOUDP-405628-validate-snapshot-blocks`.
+
+**Known follow-ups (none block this PR):**
+
+1. **PITR-from-RS starter validation** — extend `validateSnapshotBlocksReachable` to mirror `BackupSvc.findSnapshotForPit_v1` resolution and validate the resolved starter. New Jira required. ~1 dev day.
+2. **Mongo connect timeout tuning** — failure-closed path waits ~30 s before the 503 banner shows. Could shorten with a per-call `MongoClientSettings` for snapshot validation. Cosmetic; only fires when s3-meta is genuinely down.
+3. **Approach 2 (`isRestorable` flag in `ApiSnapshotView`)** — would let the UI hide / badge broken snapshots in the picker so the user never tries them in the first place. Estimated at ~4 dev days in the [effort table](#effort-estimate); recommended as a follow-up PR.
+4. **Approach 3 (scheduled groom)** — proactive integrity scan on a cadence. Largest scope; only valuable once Approach 2 is in.
+
+The Probe-6 reproduction is the main argument for queueing follow-up 1 sooner than later — PITR-from-RS is a realistic customer scenario and the data-loss bug remains intact there until the validator covers it.
+
