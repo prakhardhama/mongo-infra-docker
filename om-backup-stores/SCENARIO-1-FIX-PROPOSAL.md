@@ -369,7 +369,7 @@ Six probes, ordered to leave the RS data intact in all cases (the whole point of
 | 3 | **Feature flag off** | Disable `AUTOMATION_RESTORATION_MODE` (restart OM without the JVM flag), retry the broken-snapshot restore | Old buggy behavior preserved: HTTP 200 + agent wipes /data/db + HTTP 500 loop. Proves the flag gates the new path. | ⏭️ SKIPPED — flag-gating verified by code inspection rather than runtime. See note below. |
 | 4 | **s3-meta unreachable** | Re-enable flag, restart OM. Stop `primary-om-s3-meta` container, attempt restore of any snapshot | HTTP 503 `SNAPSHOT_BLOCK_VALIDATION_UNAVAILABLE`; no `backupRestoreUrl*` write; mongods stay up | ✅ PASS — UI banner showed the 503 detail; no agent activity; mongods untouched. ~30 s lag before the banner appears (Mongo driver's default connect timeout) — acceptable for v1 |
 | 5 | **s3-meta restored** | Start `primary-om-s3-meta` container; retry the same broken-snapshot restore from Probe 4 | HTTP 409 `SNAPSHOT_BLOCKS_MISSING` (not 503) — proves the failure-closed path correctly hands off to the failure-confirmed path once integrity can be verified | ✅ PASS — UI banner reverted to the missing-blocks message ("52 of 52 block file(s) are missing"); 503 cleared as expected |
-| 6 | **PITR auto-selects broken starter** (known follow-up) | PITR to a time after the rollback point where the picker auto-selects a broken starter snapshot | Today's fix does NOT cover PITR-from-RS-without-snapshotId — see "Risks / open questions" item 2 above. Expected behavior: same HTTP 500 loop as pre-fix. Documented for follow-up. | ⚠️ KNOWN GAP — reproduced exactly as documented. Validator silently bypassed; daemon picked the broken starter; Phase 1 fired and would have wiped the RS. Restore cancelled via UI before the loop fully ran; healthy 05:08Z snapshot used to recover the RS data. Follow-up Jira required. |
+| 6 | **PITR auto-selects broken starter** | PITR to a time after the rollback point where the picker auto-selects a broken starter snapshot | HTTP 409 `SNAPSHOT_BLOCKS_MISSING` — validator resolves the same starter the daemon would, via the shared `BackupSvc.findSnapshotForPIT(groupId, rsId, pitTimestamp)` entry point | ✅ PASS (after follow-up commit `80363209433`) — see Probe 6 + re-verify below |
 
 ### Observations (filled in as we run)
 
@@ -541,6 +541,55 @@ For PITR-from-RS the request goes through `JobType.RESTORE_RS` with no `snapshot
 
 **Follow-up Jira required.** Suggested title: "Extend SnapshotBlockValidationSvc to PITR-from-RS — mirror BackupSvc.findSnapshotForPit_v1 resolution". Estimate ~1 dev day (small refactor in `AutomatedBackupRestoreValidationSvc.validateSnapshotBlocksReachable` plus tests).
 
+#### Probe 6 re-verify — gap closed in the same PR
+
+After the gap was demonstrated, the fix was implemented and pushed as commit `80363209433` on the same branch (`prakhar.dhama/CLOUDP-405628-validate-snapshot-blocks`). The PR scope expanded to include PITR-from-RS coverage rather than spinning off a separate follow-up Jira.
+
+**Code change.** `AutomatedBackupRestoreValidationSvc.validateSnapshotBlocksReachable` gained a third branch for the case where `snapshotId == null && job.getType() != RESTORE_CLUSTER`:
+
+```java
+} else {
+  // PITR-from-RS: no snapshotId in the job params — the daemon resolves the starter snapshot
+  // at restore time via BackupSvc.findSnapshotForPIT(groupId, rsId, pitTimestamp). To stay in
+  // lockstep with the daemon's choice we call the SAME function from the validator.
+  final Snapshot starter = _backupSvc.findSnapshotForPIT(sourceGroupId, sourceRsId, pitTimestamp);
+  validateSingleSnapshot(starter);
+}
+```
+
+Two small helpers extracted in the same commit:
+
+- `extractPitTimestamp(restoreJob)` — mirrors the parse logic already used by `getClustershotFromPitTimestamp`, so the clustershot and RS PIT paths agree on timestamp interpretation.
+- `validateSingleSnapshot(snapshot)` — the shared no-op-non-S3 + delegate-to-svc tail between the snapshot-id and PITR-from-RS paths.
+
+**Re-verify run.** Restarted OM with the new build, retried the same PITR target (`2026-05-19 06:30 AM UTC`). OM log evidence (filtered to the relevant lines):
+
+```
+09:35:20  BackupSvc.findSnapshotForPit_v1 — Finding first snapshot of rsId poRepSet
+                                            older than TS time: Tue May 19 06:30:00 GMT 2026
+09:35:20                                    Found snapshot 6a0bfe17be061546c1b51190
+                                            (1431s before PIT — same as Probe 6 first run)
+
+  [draft-validation pass — looked up but not yet validated]
+
+09:35:24  BackupSvc.findSnapshotForPit_v1 — (second call, this time from the validator's new branch)
+09:35:24                                    Found snapshot 6a0bfe17be061546c1b51190
+09:35:24  SnapshotBlockValidationSvc      — Snapshot 6a0bfe17be061546c1b51190 has 52 of 52 block
+                                            files missing in the snapshot store; restore would fail
+                                            at agent download. Rejecting restore-creation.
+          SnapshotBlocksMissingException: Invalid config: Snapshot 6a0bfe17be061546c1b51190 is no
+                                          longer restorable: 52 of 52 block file(s) are missing...
+            at SnapshotBlockValidationSvc.validateSnapshotBlocks:109
+            at AutomatedBackupRestoreValidationSvc.validateSnapshotBlocksReachable:182  ← new code path
+            at AutomatedBackupRestoreValidationSvc.validateRestoreJob:111
+```
+
+The double `findSnapshotForPit_v1` log line is the key signal: the daemon's `BackupSvc.findSnapshotForPit_v1` is invoked once by the existing draft-validation path and a second time by the new validator branch. Both resolve to the same snapshot — exactly the design goal. The stack trace's `:182` lands on the new `validateSingleSnapshot(starter)` call site, confirming the PITR-from-RS branch (not the snapshot-id branch) fired.
+
+**UI behavior:** banner shows the same `Invalid config: Snapshot 6a0bfe17be061546c1b51190 is no longer restorable: 52 of 52 block file(s) are missing from the snapshot store.` message that snapshot-id restores get. `automationcore.config.automation` had no `backupRestoreUrl*` write; mongods stayed up; no recovery restore needed this time.
+
+**Outcome:** ✅ PASS — the data-loss bug is now fixed across all restore-job shapes the validator can reach (RS snapshot-id, clustershot snapshot-id, clustershot PITR, **RS PITR**). The follow-up Jira originally proposed for the PITR-from-RS path is no longer needed; the fix ships in PR #770.
+
 ### Net result
 
 **Approach-1 ships the fix it was designed to ship.** Snapshot-id-based restores (RS + clustershot) that would have wiped `/data/db` and looped HTTP 500 indefinitely are now rejected at restore-creation time with a clear HTTP 409 message. The replica set data is never modified.
@@ -552,7 +601,7 @@ For PITR-from-RS the request goes through `JobType.RESTORE_RS` with no `snapshot
 | **Broken snapshot restore — Public API** | ❌ Same wipe + loop pattern | ✅ HTTP 409 `SNAPSHOT_BLOCKS_MISSING` with structured detail (snapshotId, missing-of-total) |
 | **s3-meta unreachable** | (Not surfaced in prior testing — would have been the same wipe + 500 loop) | ✅ HTTP 503 `SNAPSHOT_BLOCK_VALIDATION_UNAVAILABLE` after ~30 s Mongo timeout. Failure-closed safeguards the RS data. |
 | **Recovery after s3-meta back up** | (N/A) | ✅ 503 cleanly transitions to 409 once integrity can be verified again |
-| **PITR-from-RS picking a broken starter** | ❌ Same wipe + 500 loop | ⚠️ **STILL ❌** — known scope gap. Validator falls through unchecked. Follow-up Jira required. |
+| **PITR-from-RS picking a broken starter** | ❌ Same wipe + 500 loop | ✅ HTTP 409 `SNAPSHOT_BLOCKS_MISSING` — validator calls the same `BackupSvc.findSnapshotForPIT` the daemon uses, so both land on the same resolved starter. Closed in commit `80363209433`. |
 
 **One UX iteration mid-session.** Initial error message included a sample of 5 missing fileIds (opaque ObjectIds, not actionable for users). Refined to:
 
@@ -563,10 +612,9 @@ Shipped as commit `795ca83b714` on `prakhar.dhama/CLOUDP-405628-validate-snapsho
 
 **Known follow-ups (none block this PR):**
 
-1. **PITR-from-RS starter validation** — extend `validateSnapshotBlocksReachable` to mirror `BackupSvc.findSnapshotForPit_v1` resolution and validate the resolved starter. New Jira required. ~1 dev day.
-2. **Mongo connect timeout tuning** — failure-closed path waits ~30 s before the 503 banner shows. Could shorten with a per-call `MongoClientSettings` for snapshot validation. Cosmetic; only fires when s3-meta is genuinely down.
-3. **Approach 2 (`isRestorable` flag in `ApiSnapshotView`)** — would let the UI hide / badge broken snapshots in the picker so the user never tries them in the first place. Estimated at ~4 dev days in the [effort table](#effort-estimate); recommended as a follow-up PR.
-4. **Approach 3 (scheduled groom)** — proactive integrity scan on a cadence. Largest scope; only valuable once Approach 2 is in.
+1. **Mongo connect timeout tuning** — failure-closed path waits ~30 s before the 503 banner shows. Could shorten with a per-call `MongoClientSettings` for snapshot validation. Cosmetic; only fires when s3-meta is genuinely down.
+2. **Approach 2 (`isRestorable` flag in `ApiSnapshotView`)** — would let the UI hide / badge broken snapshots in the picker so the user never tries them in the first place. Estimated at ~4 dev days in the [effort table](#effort-estimate); recommended as a follow-up PR.
+3. **Approach 3 (scheduled groom)** — proactive integrity scan on a cadence. Largest scope; only valuable once Approach 2 is in.
 
-The Probe-6 reproduction is the main argument for queueing follow-up 1 sooner than later — PITR-from-RS is a realistic customer scenario and the data-loss bug remains intact there until the validator covers it.
+The PITR-from-RS gap originally raised in Probe 6 was closed in the same PR rather than spun off — see commit `80363209433` and the [Probe 6 re-verify](#probe-6-re-verify--gap-closed-in-the-same-pr) section above.
 
