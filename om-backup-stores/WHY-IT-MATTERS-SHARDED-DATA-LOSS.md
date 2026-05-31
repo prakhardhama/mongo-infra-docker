@@ -348,14 +348,48 @@ OM Backup Phase 1 prevents the entire chain from starting: regression detection 
 | Primary OM JVM flag | `-Dmms.featureFlag.automation.restorationMode=enabled` |
 | Recovery point used to restore env between tests | `T_post_shard` (15:30 UTC) |
 | Restoration-mode flag at start (verified) | `restorationMode: false` (cleared) |
-| Time appdb restore submitted (Meta OM) | _TBD_ |
-| Time appdb restore completed | _TBD_ |
-| Time restoration-mode banner appeared on Primary OM UI | _TBD_ |
-| OM log: full reconciliation chain (paste) | _TBD_ |
-| Time restoration-mode banner cleared | _TBD_ |
-| Pre-exit snapshots enqueued (poRepSet + poShardClust) | _TBD_ |
-| Post-recovery config version | _TBD_ — expected ≥ 114 (preserved from agent's cache) |
-| Post-recovery chunk distribution | _TBD_ — expected: 3 chunks still on poShard_2 |
-| Post-recovery `countDocuments()` via mongos | _TBD_ — **expected: 50,000 (no loss)** |
-| Outcome | _TBD_ |
+| Pre-rollback state | 3 shards, chunks 1/1/3, mongos count 50,000, config v=114 |
+| Time appdb restore submitted (Meta OM) | ~16:23 UTC |
+| Time appdb mongod stopped (observed) | 16:24:13Z |
+| Time appdb mongod back, config v=113 | **16:33:50Z** (~10 min restore — same as Test 1) |
+| Time restoration mode entered (`RestorationModeSvc.enterRestorationMode`) | **16:33:55.313Z** (within 3 seconds of appdb coming back) |
+| OM log reason recorded | `PITR_RESTORE` |
+| Reconciliation kicked off | 16:33:55.323Z (10 ms later) |
+| Agent metadata collected | 16:34:25.437Z (T+30s) — `Collected metadata from 1/1 agents` |
+| Canonical config selected | `host=M-FNVDKKWYJR, version=114, timestamp=1780243820` |
+| CONFIG_UPLOAD AgentJob created | 16:34:25.443Z |
+| Agent uploaded 28,608 bytes of config (v=114) | 16:34:55.507Z |
+| OM merged v=114 into published v=113 | 16:34:55.550Z — `Merging uploaded config (version 114, 13 processes) into published config (version 113)` |
+| Persisted reconciled config, new version | **16:34:55.688Z, version 114** ✓ (no extra bump — agent's version already current) |
+| Pre-exit on-demand snapshots enqueued | poRepSet (16:34:55.693Z) + cluster poShardClust (16:34:55.695Z) |
+| Time restoration mode exited (`exitRestorationMode`) | **16:34:55.695Z** |
+| **Total restoration-mode lifecycle duration** | **60.4 seconds** (16:33:55.313Z → 16:34:55.695Z) |
+| `removeShard` log entries during Test 2 | **0** — agent never tried to remove poShard_2 ✓ |
+| `addShard` log entries during Test 2 | **0** — topology never mutated ✓ |
+| `AddShardsAndShardTags` / `RemoveShardsAndShardTags` agent moves | **0** — agent stayed in goal state |
+| Pre-exit snapshots completed | poRepSet at 16:35:52Z ✓ (`complete=true`); poShard_1 at 16:37:48Z (in progress at time of capture) |
+| Post-recovery `listShards` | `config`, `poShard_1`, **`poShard_2`** ✓ — all 3 still present |
+| Post-recovery chunk distribution | `config: 1, poShard_1: 1, poShard_2: 3` (unchanged from pre-rollback) ✓ |
+| Post-recovery `countDocuments()` via mongos | **50,000** ✓ — no data movement at all |
+| Post-recovery `restorationMode` flag | `false` (cleared cleanly) |
+| Operator intervention required | **None** — fully automatic |
+| Outcome | ✅ **PASS — full topology + data preservation, ~1 min auto-recovery, zero operator intervention** |
+
+### Side-by-side comparison
+
+**Same starting condition. Same rollback target. Only the feature flag differs.**
+
+| Aspect | Test 1 (feature DISABLED) | Test 2 (feature ENABLED) |
+|---|---|---|
+| `removeShard poShard_2` issued by agent | ✅ YES — at 21:48:48 IST | ❌ NO |
+| Chunks forcibly migrated off poShard_2 | ✅ YES — 3 chunks drained in 15s (production: hours) | ❌ NO — chunks stayed put |
+| Cluster topology after rollback | **3 shards → 2 shards** (poShard_2 removed) | **3 shards → 3 shards** (unchanged) |
+| Orphaned data left on poShard_2 mongods | 11,955 docs + `demo` db metadata | None |
+| `addShard` recovery failed because of orphan data | ✅ YES — `addShard` rejected: `local database 'demo' exists in another poShard_1` | N/A (no removal happened) |
+| Operator manual intervention to recover | **Required** — drop orphan db, wait for rebalance | **None** |
+| Restoration-mode banner shown to user | ❌ Never | ✅ Yes — `PITR_RESTORE` reason |
+| Reconciliation chain executed | ❌ None | ✅ 60.4 seconds end-to-end |
+| Pre-exit snapshots auto-enqueued for both RS + cluster | ❌ None | ✅ Yes |
+| Customer data outcome | Preserved by MongoDB's drain semantics, but **at cost of cluster destabilization + forced migration + manual recovery + orphan-data risk** | Fully preserved with **zero side effects** |
+| End-to-end customer recovery time | Hours (manual investigation + drop orphan + wait for rebalance) | **~1 minute, fully automatic** |
 
