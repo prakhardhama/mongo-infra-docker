@@ -319,6 +319,28 @@ In our PoC run, the data didn't catastrophically vanish because MongoDB's `remov
 
 The key point: **without OM Backup Phase 1, the system disposes of the customer's deliberate topology change because OM lost track of it.** That's the operational anti-pattern this feature exists to prevent.
 
+#### Recovery is NOT automatic — the operator gets stuck
+
+A subtle and severe follow-on impact was observed during our PoC run when we tried to recover the topology by restoring the appdb FORWARD to a snapshot that contained poShard_2 in the config:
+
+```
+(OperationFailed) can't add shard 'poShard_2/M-FNVDKKWYJR:27067,M-FNVDKKWYJR:27068'
+because a local database 'demo' exists in another poShard_1
+```
+
+MongoDB's `addShard` command refuses to add poShard_2 back to the cluster because the **11,955 orphaned docs** left behind on poShard_2's mongods (from before the `removeShard` drain) include the `demo` database — which now also lives on `config` + `poShard_1` (where they were drained to). `addShard` doesn't allow a new shard to join if any of its databases overlap with the existing cluster.
+
+The agent gets stuck in a retry loop on `AddShardsAndShardTags → Plan execution failed`. The cluster stays at 2 shards. **The operator has to manually intervene** to make recovery possible:
+
+1. Connect directly to poShard_2's primary (`mongosh mongodb://<poShard_2-primary>:27067 --eval 'db.getSiblingDB("demo").dropDatabase()'`)
+2. Carefully verify that the data being dropped is the orphan copy, not live data (real-world risk: misidentification → operator drops customer-critical data)
+3. Wait for the agent's next addShard retry to succeed
+4. Wait for the balancer to re-migrate chunks back to poShard_2 (15s in our PoC; hours-to-days at production scale)
+
+**This compounds the original problem.** The customer not only lost their topology change, they now need careful manual intervention to restore it — and the intervention itself is a data-loss risk if the operator misjudges what's orphaned.
+
+OM Backup Phase 1 prevents the entire chain from starting: regression detection + restoration mode + reconciliation means `removeShard` never runs in the first place, so there's no orphaned data, no addShard failure, no manual recovery.
+
 ### Test 2 — Data Retention (restorationMode = ENABLED)
 
 | Field | Value |
