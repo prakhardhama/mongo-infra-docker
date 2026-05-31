@@ -263,26 +263,59 @@ the agent's next poll hits OM with the cached `cv=`.
 
 ## Appendix C — Test record
 
-_Filled in when the demonstration is executed._
+_Captured during 2026-05-31 demonstration run on local PoC (Meta OM + Primary OM + 1-replica-set + 1-sharded-cluster topology with backing DBs in Docker)._
+
+### Common setup (executed once, before either test)
 
 | Field | Value |
 |---|---|
-| Date / time of run (UTC) | _TBD_ |
-| Test operator | _TBD_ |
-| Group ID | _TBD_ |
-| `T_baseline` (appdb snapshot OID) | _TBD_ |
-| `T_baseline` (appdb snapshot timestamp) | _TBD_ |
-| Number of docs inserted | _TBD_ |
-| Pre-rollback config version | _TBD_ |
-| Pre-rollback `sh.status()` — chunks per shard | _TBD_ |
-| Chunk(s) moveChunk'd to poShard_2 | _TBD_ |
-| Time appdb restore submitted | _TBD_ |
-| Time restoration-mode banner appeared | _TBD_ |
-| OM log: ReconciliationOrchestrator entries (paste) | _TBD_ |
+| Date of run | 2026-05-31 |
+| Project name | OM Backup |
+| Group ID | `69ef3ca159819e73bb7f8552` |
+| `T_baseline` (appdb snapshot before poShard_2 added) | **15:03 UTC** |
+| `T_post_shard` (appdb snapshot AFTER poShard_2 + data migration; recovery point) | **15:30 UTC** |
+| Sharded collection seeded | `demo.demo_docs` (hashed shard key on `sk`) |
+| Docs inserted | **50,000** (~10 MB total, 200 bytes each) |
+| poShard_2 ports | 27067 (primary), 27068 (secondary) — 2-member RS |
+| Default chunk size adjusted | 128MB → **1 MB** (to encourage auto-rebalance without manual moveChunk) |
+| Pre-rollback config version | **114** (was 113 before adding poShard_2) |
+| Pre-rollback chunk distribution | `poShard_2: 3 chunks`, `poShard_1: 1 chunk`, `config: 1 chunk` (5 total) |
+| Pre-rollback docs physically on poShard_2 (direct query to mongod) | **11,955** (≈ 24% of total) |
+| Pre-rollback `countDocuments()` via mongos | 50,000 (all chunks reachable) |
+| Migration evidence in `config.changelog` | `poShard_1 → poShard_2` at 15:25:57 UTC, `config → poShard_2` at 15:25:58 UTC (auto-balancer, not manual moveChunk) |
+
+### Test 1 — Data Loss (restorationMode = DISABLED)
+
+| Field | Value |
+|---|---|
+| Primary OM JVM flag | `-Dmms.featureFlag.automation.restorationMode=disabled` |
+| Restoration-mode flag at start (verified) | `restorationMode: false` on customer doc |
+| poShard_2 mongods at start | Both alive (PIDs 30440 on :27067, 30441 on :27068), serving 11,955 docs directly |
+| Time appdb restore submitted (Meta OM) | _TBD_ |
+| Time appdb restore completed | _TBD_ |
+| Time agent next poll after rollback | _TBD_ |
+| Time poShard_2 mongods stopped by agent | _TBD_ |
+| `countDocuments()` via mongos AFTER agent reacts | _TBD_ — **expected: error or partial count < 50,000** |
+| `mongosh mongodb://localhost:27067` direct connect AFTER | _TBD_ — **expected: connection refused** |
+| poShard_2 in OM UI Deployment view AFTER | _TBD_ — **expected: missing / processes removed** |
+| OM log entries (no `ReconciliationOrchestrator`, no `RestorationModeSvc`) | _TBD_ — confirms no safety net engaged |
+| Outcome | _TBD_ |
+
+### Test 2 — Data Retention (restorationMode = ENABLED)
+
+| Field | Value |
+|---|---|
+| Primary OM JVM flag | `-Dmms.featureFlag.automation.restorationMode=enabled` |
+| Recovery point used to restore env between tests | `T_post_shard` (15:30 UTC) |
+| Restoration-mode flag at start (verified) | `restorationMode: false` (cleared) |
+| Time appdb restore submitted (Meta OM) | _TBD_ |
+| Time appdb restore completed | _TBD_ |
+| Time restoration-mode banner appeared on Primary OM UI | _TBD_ |
+| OM log: full reconciliation chain (paste) | _TBD_ |
 | Time restoration-mode banner cleared | _TBD_ |
-| Post-recovery config version | _TBD_ |
-| Post-recovery `sh.status()` — chunks per shard | _TBD_ |
-| Post-recovery `db.demo.docs.countDocuments()` | _TBD_ |
-| Pre-exit snapshots enqueued | _TBD_ |
+| Pre-exit snapshots enqueued (poRepSet + poShardClust) | _TBD_ |
+| Post-recovery config version | _TBD_ — expected ≥ 114 (preserved from agent's cache) |
+| Post-recovery chunk distribution | _TBD_ — expected: 3 chunks still on poShard_2 |
+| Post-recovery `countDocuments()` via mongos | _TBD_ — **expected: 50,000 (no loss)** |
 | Outcome | _TBD_ |
 
