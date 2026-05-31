@@ -6,14 +6,16 @@ _Demonstrating the data-loss scenario this feature prevents._
 
 In a Meta-OM-backs-Primary-OM topology, rolling back the Primary OM's
 appdb to a state from before a customer added a shard would, **without
-this feature**, cause the agent to stop the new shard's mongods on its
-next poll. Any chunks the balancer had migrated to that shard would
-become **unreachable through the mongos** — effective data loss until
-the shard's processes are restarted by hand and OM's automation config
-is rebuilt. **OM Backup Phase 1 closes this gap** by detecting the
-appdb regression, putting the group into restoration mode, and merging
-the agent's cached (newer) automation config back into the published
-config so the new shard stays managed.
+this feature**, cause the agent to issue `removeShard` on the customer's
+cluster on its next poll. The cluster's topology gets silently mutated
+(3 shards → 2 shards in our PoC), all data on the new shard is forcibly
+drained back to the original shards (15 seconds at PoC scale; hours-to-days
+at production scale with TBs of data), and the customer has to manually
+re-add the shard to restore the topology. **OM Backup Phase 1 closes this
+gap** by detecting the appdb regression, putting the group into restoration
+mode, and merging the agent's cached (newer) automation config back into
+the published config so the new shard stays managed — no removeShard, no
+drain, no topology mutation.
 
 ---
 
@@ -291,15 +293,31 @@ _Captured during 2026-05-31 demonstration run on local PoC (Meta OM + Primary OM
 | Primary OM JVM flag | `-Dmms.featureFlag.automation.restorationMode=disabled` |
 | Restoration-mode flag at start (verified) | `restorationMode: false` on customer doc |
 | poShard_2 mongods at start | Both alive (PIDs 30440 on :27067, 30441 on :27068), serving 11,955 docs directly |
-| Time appdb restore submitted (Meta OM) | _TBD_ |
-| Time appdb restore completed | _TBD_ |
-| Time agent next poll after rollback | _TBD_ |
-| Time poShard_2 mongods stopped by agent | _TBD_ |
-| `countDocuments()` via mongos AFTER agent reacts | _TBD_ — **expected: error or partial count < 50,000** |
-| `mongosh mongodb://localhost:27067` direct connect AFTER | _TBD_ — **expected: connection refused** |
-| poShard_2 in OM UI Deployment view AFTER | _TBD_ — **expected: missing / processes removed** |
-| OM log entries (no `ReconciliationOrchestrator`, no `RestorationModeSvc`) | _TBD_ — confirms no safety net engaged |
-| Outcome | _TBD_ |
+| Time appdb restore submitted (Meta OM) | ~15:37 UTC |
+| Time appdb mongod stopped (observed) | 15:38:16 UTC |
+| Time appdb mongod back, config v=113 (observed) | 15:48:44 UTC (~10 min total restore — large appdb >1GB compressed) |
+| Time agent on host received rolled-back config | ~15:48:48 IST (`clusterConfig edition is different`) |
+| Time agent issued `removeShard poShard_2` to mongos | **15:48:48.654 IST** (essentially immediately) |
+| Drain duration | 15.26 seconds (3 chunks migrated `poShard_2 → config + poShard_1`) |
+| Time `removeShard` completed | **15:49:04 IST** (`state: completed`) |
+| `countDocuments()` via mongos AFTER drain | **50,000** ✓ (preserved by drain semantics — see "Important nuance" below) |
+| `mongosh mongodb://localhost:27067` direct connect AFTER | Still accepts connections; **11,955 orphaned docs still physically present** on the now-removed mongod |
+| poShard_2 in mongos `listShards` AFTER | **MISSING** — cluster topology forcibly reduced from 3 → 2 shards |
+| Chunk distribution AFTER | `config: 3 chunks`, `poShard_1: 2 chunks` (was 1/1/3 with poShard_2 included) |
+| OM log entries | NO `ReconciliationOrchestrator`, NO `RestorationModeSvc`, NO `enterRestorationMode` — confirms no safety net engaged |
+| Outcome | ⚠️ **Topology destruction + forced data migration, data preserved by MongoDB's `removeShard` drain semantics only** |
+
+#### Important nuance — the actual customer impact
+
+In our PoC run, the data didn't catastrophically vanish because MongoDB's `removeShard` command **drains chunks before removing the shard**. All 50,000 docs reshuffled in 15 seconds and remained reachable via mongos. But the customer experience was still severely degraded:
+
+1. **Cluster topology silently mutated.** Customer added 3 shards in Phase A; cluster is now at 2 shards in Phase B. The "added shard" was undone by OM without operator consent.
+2. **Forced data redistribution.** 11,955 docs (24% of collection) had to migrate during the drain window. At PoC scale this took 15s; at production scale (TBs of data, jumbo chunks, balancer contention) the drain can take **hours to days**, during which the cluster is degraded.
+3. **Customer must manually re-add the shard.** No automatic recovery path — the operator has to notice and intervene.
+4. **Failure modes during drain become data-loss modes.** If the drain crashes mid-way (agent restart, network partition, jumbo chunk that can't migrate, disk-full on destination shard), data lands in an undefined state — the `removeShard` command becomes a real data-loss vector instead of a safe migration.
+5. **Orphaned data on the removed shard.** poShard_2's mongods still hold 11,955 docs that are now invisible to the cluster — both wasted storage AND a potential source of confusion if anyone reconnects directly to those mongods later.
+
+The key point: **without OM Backup Phase 1, the system disposes of the customer's deliberate topology change because OM lost track of it.** That's the operational anti-pattern this feature exists to prevent.
 
 ### Test 2 — Data Retention (restorationMode = ENABLED)
 
