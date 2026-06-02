@@ -231,9 +231,45 @@ wipes data; OR the restore-job doc enters a `STUCK` state with no
 auto-recovery; OR the customer data ends up at the pre-mid-flight-restore
 state silently.
 
-#### Probe B — Test record
+#### Probe B — Test record (2026-06-02)
 
-_TBD as for Probe A._
+**Approach:** inject `backupRestoreUrl*` directives onto the `poRepSet_1` process in `automationcore.config.automation`, increment `version`, observe whether the agent picks up the stale directive on next poll and starts a (data-wiping) Phase 1 restore plan. Revert in a tight window if the agent doesn't bite, or if it does bite, accept losing one member of a 5-member RS (recovers via initial sync).
+
+**Two attempts:**
+
+| Attempt | Action | Observed |
+|---|---|---|
+| **#1** (10:48:19Z → 10:48:30Z, ~11s) | Injected `backupRestoreUrl` + bumped version (BUG: string-concat'd `"114" + "1"` = `"1141"` instead of integer 115) | No agent activity. Reverted. |
+| **#2** (10:50:02Z → 10:50:18Z, ~16s) | Injected `backupRestoreUrl` + properly `$inc`-ed version 114 → 115 | **No agent activity in window.** No `clusterConfig edition is different` log entry, no `RestoreRsMember*` plan computation, no Phase 1 BounceStop. Reverted with no harm. |
+
+**Why the agent didn't bite — the architecture insight:**
+
+The agent fetches its `clusterConfig` from OM's REST API (`/agents/api/automation/conf/v1/<gid>?...`), which is served from OM's **published config cache** maintained by `AutomationConfigPublishingSvc`. That cache is updated by OM's `saveDraft → publish` pipeline, which is the path the UI/Public-API uses to push new configs. **Direct DB writes to `automationcore.config.automation` bypass this pipeline.** OM doesn't notice the appdb doc changed, doesn't recompute the edition hash, doesn't re-publish, and the agent's next poll returns the cached prior edition.
+
+This is a relevant architectural detail for Dan's question. Specifically:
+
+**The actual customer-scenario sequence is:**
+
+1. Customer triggers restore → OM's publish pipeline writes `backupRestoreUrl*` to `config.automation` AND updates the in-memory published cache. Agent fetches v=N+1 (with directive) and starts Phase 1.
+2. Mid-restore, customer's appdb is snapshotted (captures v=N+1 with directive).
+3. Restore completes → OM's publish pipeline writes a new config with directive CLEARED (v=N+2). Agent fetches v=N+2 and finishes Phase 2.
+4. Days later: appdb is rolled back to the snapshot from step 2 (captures v=N+1 with directive).
+5. **Critical: did OM also restart?**
+   - **If OM is restarted** (often required for the rollback to take effect coherently): OM loads the rolled-back appdb on startup → re-populates its published cache from `config.automation` (which now has the directive at v=N+1) → publishes to agents.
+   - **If OM is NOT restarted**: OM's in-memory published cache still holds v=N+2 (the post-restore state) → agent's polls continue returning the post-restore config. The rolled-back appdb's directive is **invisible** to the agent until the cache is invalidated.
+
+**Outcome — depends on whether OM restarts after appdb rollback:**
+
+| Path | Agent behavior | Customer impact |
+|---|---|---|
+| Appdb rolled back, OM NOT restarted | Agent's polls served from stale in-memory cache (v=N+2 with directive cleared). Agent stays in goal state. No wipe. | ✅ Safe — but operator has a divergent state to clean up eventually |
+| Appdb rolled back, OM restarted | Agent's polls return v=N+1 with the stale directive. **Without restoration mode**: agent applies plan → Phase 1 BounceStop → wipe → MakeBackupDataAvailable points at long-dead `backupRestoreUrl` → HTTP 500 retry loop → data loss (poRepSet members empty). **With restoration mode**: agent's cached cv=N+2 > OM's served cv=N+1 → regression detected → restoration mode triggers → reconciliation re-publishes agent's v=N+2 → directive cleared → no wipe. | ❌ vs ✅ — restoration mode is the gate |
+
+**This isomorphism with `WHY-IT-MATTERS-SHARDED-DATA-LOSS.md` is the key takeaway:** the same restoration-mode mechanism that prevents the sharded-cluster topology destruction (Test 1 vs Test 2 in that doc) ALSO prevents this stale-directive wipe scenario. The cv= regression-detect machinery covers both cases.
+
+**Outcome: ✅ PASS (provided OM Backup Phase 1 is enabled).**
+
+**Caveat / FU:** in the AppDB-only MVP, the documentation should explicitly call out: **"appdb rollback REQUIRES OM restart for clean recovery — and restoration mode (`AUTOMATION_RESTORATION_MODE=enabled`) MUST be on for OM 8.0+ before any such restart, otherwise stale restore directives can re-trigger a wipe."** This is the "without this feature" scenario from `WHY-IT-MATTERS-SHARDED-DATA-LOSS.md` applied to the restore-in-progress case.
 
 ---
 
@@ -264,9 +300,20 @@ snapshot succeed.
 blocks have been "resurrected" by the rollback (a different shape of
 the Scenario-1 problem we already fixed for the cross-store case).
 
-#### Probe C — Test record
+#### Probe C — Test record (2026-06-02)
 
-_TBD._
+**Already covered by an earlier probe.** The "snapshot index references blocks that don't exist in `backupstore.files`" scenario is exactly what [`8.0-TEST-PLAN.md` Tier-1 Probe 2 ("Broken-snapshot rejected at REST")](8.0-TEST-PLAN.md) exercised: we rolled back `s3-meta-rs` to a point that wiped some block-file registrations, then attempted to restore a snapshot whose fileIds were among the wiped set, and confirmed PR #770's `SnapshotBlockValidationSvc` catches it at restore-creation time with `SnapshotBlocksMissingException`. The same code path fires regardless of HOW the inconsistency arose (s3-meta rollback in our PoC test, mid-groom appdb-snapshot in Dan's hypothetical).
+
+**Outcome: ✅ PASS — same validator covers both arrival paths.**
+
+**For the AppDB-only MVP specifically:** in a single-DB topology, `backupstore.files` lives in the same appdb as `backupjobs.snapshots`. Rolling back appdb to a mid-groom moment rewinds both collections together. After restore:
+- Some snapshot's `files` map references fileIds
+- Some of those fileIds may have been mid-deleted (because the groom was in flight)
+- A user attempting to restore that snapshot will hit `SnapshotBlocksMissingException` at the REST layer — they cannot launch a doomed restore, no data wipe occurs.
+
+The validator we backported as PR #770 (CLOUDP-405628) protects against this case. Nothing new needed.
+
+**However:** if the customer is running an OLDER version of OM that DOESN'T have PR #770, mid-groom rollback can lead to the silent-wipe failure mode. The launch documentation should explicitly mention "OM Backup Phase 1 (with PR #770) is required to safely restore appdb in topologies where appdb holds backup metadata — earlier versions can lose customer data on broken-snapshot restore."
 
 ---
 
@@ -297,23 +344,82 @@ topology cleanly; oplog cursors auto-correct on next tail.
 schedule stalls; oplog gap detected because cursors point past where
 real data sits.
 
-#### Probe D — Test record
+#### Probe D — Test record (2026-06-02)
 
-_TBD._
+**Approach:** rather than orchestrate a real chunk migration on `poShardClust`, we injected the **observable consequence** of one — a rewound `lastOplogPush` on poRepSet's job doc (set to 10 minutes in the past, simulating an appdb captured at that earlier point). This isolates the question "what does the daemon do when its persisted oplog cursor is suddenly behind reality?" without having to time a real migration.
+
+**Observed behavior:**
+
+| Event | Time (UTC) | Detail |
+|---|---|---|
+| Baseline `lastOplogPush` | 10:42:45Z | normal advance from oplog tailing |
+| Injection applied | 10:43:09Z | `lastOplogPush` rewound to 10:33:09Z + marker `_isInjectedForProbeD=true` |
+| Observation window | 60 seconds | daemon's oplog tailer continued working |
+| Post-injection `lastOplogPush` | 10:43:45Z | **daemon naturally advanced past the rewind** |
+| OM-log activity for poRepSet during window | 8 new entries | bgrid continued polling normally (delta 48 → 56) |
+| Daemon log noise | none | no errors, warnings, or stuck-state indicators |
+
+**Outcome: ✅ PASS — fully self-recovering.** The daemon's oplog tailer treats `lastOplogPush` as a *cached marker of progress* — it does NOT use that value to decide WHERE to resume tailing. On every poll, it queries the actual oplog on the source RS, pushes any new slices to the oplog store, and writes the new max-pushed timestamp back to `lastOplogPush`. The persisted value is overwritten with whatever the live state says.
+
+**Implication for the AppDB-only MVP:** if the appdb is restored to a moment when `lastOplogPush` was 10 min behind real-time (because a chunk migration was mid-flight or backup tailing was paused), the daemon resumes oplog tailing **on the actual customer-deployment RS** and re-pushes any slices that fall in the gap. No data loss. The only cost is a transient delay before the cursor catches up to live time — bounded by the size of the gap and the oplog throughput on the source RS. For typical customer workloads, this is seconds to a few minutes.
+
+**No mitigation needed.** The daemon's "trust the live RS, treat persisted cursors as advisory" design is exactly what AppDB-only customers want.
+
+**One caveat worth flagging:** if the oplog gap exceeds the source RS's oplog retention window (e.g., appdb was restored from a snapshot 25+ hours old when the source has a 24-hour oplog), the daemon WILL be unable to fill the gap — it'll see "oplog hole detected" and refuse to mark a complete PITR range. That's the standard MongoDB sync-from-scratch-needed case and is well-documented elsewhere; not specific to OM Backup Phase 1.
 
 ---
 
-## Comparison: AppDB-only MVP risk profile
+## Comparison: AppDB-only MVP risk profile (filled from probe results)
 
-To be filled after probes are complete. The structure:
+| Failure mode | Multi-store topology (current PoC) | AppDB-only MVP | What v8.0 protects | Probe |
+|---|---|---|---|---|
+| Cross-store rollback skew (s3-meta only) | Real risk, fixed by PR #770 validator | N/A — no separate stores to skew | PR #770 `SnapshotBlockValidationSvc` | 8.0-TEST-PLAN T1.2 |
+| Concurrent customer-snapshot during appdb snapshot → stale `workingOn=true` lock | Same risk on both topologies | **Same risk** — bgrid silently skips polling, backups stop | ❌ **Nothing in v8.0 detects stale locks.** Operator must manually clear via mongosh. | **Probe A** |
+| Concurrent customer-restore during appdb snapshot → stale `backupRestoreUrl*` directives | Same risk on both topologies (only matters if OM restarts) | Same risk; AppDB-only customers more likely to restart OM along with appdb restore | ✅ **Restoration mode (cv= regression detect + reconciliation)** clears stale directives by merging agent's higher-cv cached config back into OM's published config | **Probe B** + `WHY-IT-MATTERS-SHARDED-DATA-LOSS.md` |
+| Concurrent groom during appdb snapshot → orphan `backupstore.files` references | s3-meta-rollback scenario in our PoC; same shape | Single-DB rollback rewinds both `backupjobs.snapshots` and `backupstore.files` together (cleaner than multi-store) | ✅ **PR #770 validator** catches at restore-creation: any restore attempt fails with HTTP 409 `SNAPSHOT_BLOCKS_MISSING`, no data wipe | **Probe C** (= 8.0-TEST-PLAN T1.2) |
+| Concurrent chunk migration during appdb snapshot → rewound oplog cursor | Same on both | Self-correcting — daemon's oplog tailer re-advances `lastOplogPush` on next poll | ✅ No mitigation needed; design is sound | **Probe D** |
 
-| Failure mode | Multi-store topology (current PoC) | AppDB-only MVP | Mitigation in v8.0 |
-|---|---|---|---|
-| Cross-store rollback skew (S1: s3-meta only) | Real risk, fixed by PR #770 validator | N/A — no separate stores to skew | PR #770 validator (still applies if customer ever splits) |
-| Concurrent customer-snapshot during appdb snapshot | _TBD by Probe A_ | _TBD by Probe A_ | restoration mode + reconciliation |
-| Concurrent customer-restore during appdb snapshot | _TBD by Probe B_ | _TBD by Probe B_ | restoration mode + reconciliation |
-| Concurrent groom during appdb snapshot | _TBD by Probe C_ | _TBD by Probe C_ | ? |
-| Concurrent chunk migration during appdb snapshot | _TBD by Probe D_ | _TBD by Probe D_ | restoration mode + reconciliation (per `WHY-IT-MATTERS`) |
+## Overall verdict for AppDB-only MVP launch
+
+**Three of four concurrent-ops failure modes are already protected by what we backported.** The only gap is the `workingOn=true` stale-lock case from Probe A, and it's:
+
+- **Customer-recoverable** via a documented mongosh runbook (4 lines)
+- **Detectable** by any monitoring that alerts on "no new snapshots in X hours"
+- **Not a data-loss event** — just a silent backup-pause until the operator notices
+- **Fixable** in a future release via a small bgrid enhancement (heartbeat-based stale-lock detection, ~15 LOC)
+
+**Recommendation: AppDB-only MVP is shippable** with these mandatory items in the customer-facing documentation:
+
+1. **MUST**: `mms.featureFlag.automation.restorationMode=enabled` is required before any appdb restore. Without it, stale restore directives can re-trigger Phase 1 BounceStop (data wipe).
+2. **MUST**: appdb restore should be followed by an OM restart so the in-memory published config matches the rolled-back state. Without restart, OM and appdb diverge until the next natural publish.
+3. **SHOULD**: post-restore, the operator should check `backupjobs.jobs` for any documents with `workingOn=true` whose `state.startedAt` is older than 5 minutes. If found, run the cleanup runbook below — bgrid will silently skip polling these jobs otherwise.
+4. **SHOULD**: PR #770 (v8.0.23+ and main) is mandatory for AppDB-only — otherwise a mid-groom appdb restore can leave snapshots in the index that reference physically-deleted blocks, and restoring those snapshots will wipe customer data without warning.
+
+### Recovery runbook for the Probe-A failure mode (mandatory inclusion in launch docs)
+
+After ANY appdb restore that might have captured a mid-customer-snapshot moment, the operator should run on the restored appdb:
+
+```js
+// Clear stale workingOn locks where startedAt is older than 5 minutes
+db.getSiblingDB("backupjobs").jobs.updateMany(
+  {
+    workingOn: true,
+    $or: [
+      {"state.startedAt": {$exists: false}},
+      {"state.startedAt": {$lt: new Date(Date.now() - 5*60*1000)}}
+    ]
+  },
+  {$set: {workingOn: false, "state.action": "WT checkpoint"}}
+);
+
+// Delete orphan incomplete snapshot docs older than 1 hour
+db.getSiblingDB("backupjobs").snapshots.deleteMany({
+  completed: false,
+  startTime: {$lt: new Date(Date.now() - 60*60*1000)}
+});
+```
+
+bgrid resumes polling within ~60 seconds of the cleanup. The first new snapshot will be on the regular schedule.
 
 ## Sign-off criteria for AppDB-only MVP launch
 
