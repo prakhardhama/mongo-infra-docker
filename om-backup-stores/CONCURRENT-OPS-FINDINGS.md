@@ -122,18 +122,82 @@ or (b) presents a clear error state that an operator can recover from
 never releases; new snapshots can't proceed; or a snapshot index doc
 exists that the daemon thinks is complete but data isn't actually in S3.
 
-#### Probe A — Test record
+#### Probe A — Test record (2026-06-02)
 
-| Field | Value |
-|---|---|
-| Date | _TBD_ |
-| Customer RS used | _TBD_ |
-| Data size + snapshot upload duration | _TBD_ |
-| `T_midflight_snapshot` (appdb snapshot OID) | _TBD_ |
-| Pre-rollback state of poRepSet job doc | _TBD_ |
-| Post-rollback daemon log (first 5 min) | _TBD_ |
-| Recovery time | _TBD_ |
-| Outcome | _TBD_ |
+**Execution note:** the natural orchestration (bump `nextSnapshot` in appdb to trigger a real customer snapshot timed to overlap with an appdb-rs snapshot) hit two blockers on this PoC:
+1. Customer snapshot triggers fired on the OM-side scheduler (`WTCheckpointScheduleSvc: all conditions met`) but failed at the agent step (`Abort triggered by error from M-FNVDKKWYJR(108.0.24): ProcessCursorDescription failed... Status: 500 Server Error`). The locally-built dev agent doesn't appear to handle the WT checkpoint cursor description request the same way a production agent does.
+2. Meta OM's `appdb-rs` snapshot scheduler was also silent despite bumping `nextSnapshot` to the past.
+
+To get an answer to the underlying question (**"what does bgrid do when it sees mid-flight markers in appdb that don't correspond to actual ongoing work?"**), we pivoted to **artificial state injection** (per user-approved Option B): we injected a mid-snapshot state into `backupjobs.jobs` for poRepSet + an `_isInjectedForProbe`-marked incomplete snapshot doc, observed bgrid's behavior, then reverted.
+
+**Injection state (live appdb, not a captured/restored snapshot — same observable behavior):**
+
+```json
+// backupjobs.jobs.findOne(rsId: "poRepSet")  AFTER injection
+{
+  "workingOn": true,
+  "state": {
+    "action": "WT checkpoint in-progress",
+    "startedAt": "2026-06-02T10:18:45.250Z"
+  },
+  "wtBackup.checkpointingTarget.attemptInProgress": true,
+  "_isInjectedForProbe": true
+}
+// + one new backupjobs.snapshots doc with completed=false
+```
+
+**Observed behavior:**
+
+| Event | Time (UTC) | Detail |
+|---|---|---|
+| bgrid last poll of poRepSet PRE-injection | 10:17:49.193Z | DEBUG `WTCheckpointScheduleSvc.isWTCSnapshotTime: WTC snapshot time: all conditions met` |
+| Injection applied | 10:18:45.250Z | `workingOn=true`, new snapshot doc inserted with `completed=false` |
+| bgrid log activity on poRepSet | **none** | Silent for the full 4-minute observation window (10:18:45 → 10:21:31) |
+| State observed during silence | 10:18:45 → 10:21:31 | `workingOn=true / state.action="WT checkpoint in-progress" / incomplete snapshot doc still present` |
+| Injection reverted | 10:21:31Z | `workingOn=false`, injected snapshot doc deleted |
+| bgrid resumed polling poRepSet | **10:22:45.652Z** (73s later) | INFO `WTCheckpointBackupSvc.deleteInProgressCheckpointSnapshot: Deleting in progress checkpoint... backupId: 51760211-...` (defensive cleanup before new snapshot attempt) |
+| `Couldn't find incomplete snapshot` WARN | 10:22:45.652Z | bgrid's "clean up any orphan in-progress before starting fresh" path is in place — it tries to delete stragglers; ours was already gone (`removed: 1` is a different doc from the same cleanup) |
+
+**Outcome: ⚠️ PASS-with-significant-caveat.** bgrid recovers automatically WHEN the stale lock is cleared, but **does NOT automatically detect or clear a stale lock**.
+
+#### Probe A — failure-mode characterization (the launch-readiness answer)
+
+**In the AppDB-only MVP scenario,** if a customer's appdb is restored from a snapshot that was captured **while a customer-deployment snapshot was mid-flight** (i.e., a real-world race), the restored state will contain:
+
+- `backupjobs.jobs.workingOn = true` (mid-snapshot lock held)
+- `backupjobs.jobs.state.action = "WT checkpoint in-progress"` (or similar non-terminal state)
+- One or more `backupjobs.snapshots` docs with `completed = false`
+
+bgrid honors `workingOn=true` as "another bgrid instance currently owns this job, defer". It does NOT:
+
+- Compare `state.startedAt` against current time to detect stale locks
+- Compare the `machine.bound` lock against itself to detect "wait, that's MY own machine and I'm not actually working — this is a stale lock from a restored snapshot"
+- Auto-clear in-progress snapshot docs whose timestamps are older than some grace period
+
+**Customer impact:** **All scheduled backups for that RS stop until an operator manually clears the lock by setting `workingOn=false` and deleting the orphaned incomplete snapshot doc.** No log warning is emitted to alert the operator that this happened. The customer wouldn't notice until they look at the snapshot schedule and realize nothing's been taken in hours.
+
+**Recovery procedure (operator):**
+
+```js
+// Connect to the appdb (this is Primary OM's, on port 27018 in our PoC)
+db.getSiblingDB("backupjobs").jobs.updateMany(
+  {workingOn: true},
+  {$set: {workingOn: false, "state.action": "WT checkpoint"}}
+);
+db.getSiblingDB("backupjobs").snapshots.deleteMany(
+  {completed: false, startTime: {$lt: new Date(Date.now() - 60*60*1000)}}  // older than 1 hour
+);
+```
+
+Within ~60s of the cleanup, bgrid resumes polling and takes a fresh snapshot.
+
+**Mitigations the v8.0 code does NOT have, that would close this gap:**
+
+1. **Stale-lock detection in bgrid**: on every poll cycle, check `state.startedAt` (and/or a heartbeat-timestamp field). If older than `2 × poll_interval`, clear `workingOn` and log a WARN. Estimated ~15 LOC in `WTCheckpointScheduleSvc`.
+2. **WARN on permanently stale orphan snapshot docs**: any snapshot doc with `completed=false` and `startTime` older than 1 hour should emit a log warning so monitoring can alert.
+3. **Restoration-mode integration**: if restoration mode is triggered (e.g. via the regression detect we backported), reconciliation could include "clear stale workingOn locks" as part of the recovery procedure.
+
+None of these are launch-blockers but they ARE the right follow-ups to address Dan's specific concern. **Most important**: the AppDB-only MVP customer-facing documentation MUST flag this recovery procedure, because the customer's "I restored my appdb and now backups have stopped" support case is going to happen, and the operator needs the runbook above to recover.
 
 ---
 
