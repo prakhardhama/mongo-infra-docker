@@ -8,7 +8,7 @@ all backup machinery state lives in one DB._
 
 ## Context and motivation
 
-From the launch-readiness Slack thread:
+From the launch-readiness Slack thread (note: the AppDB-only framing has since been superseded — see below):
 
 > Some customers will (despite our best practices) be using AppDB for
 > everything (no separate stores for backup metadata). So I actually
@@ -17,6 +17,17 @@ From the launch-readiness Slack thread:
 > got scenarios like the OM being backed up was doing a
 > restore/grooming/backup when its AppDB was itself backed up. What
 > happens then?
+
+**Scope update (post-experiment):** the MVP scope has expanded to
+**include all three backing stores** (appdb-rs + s3-meta-rs +
+oplog-meta-rs), not just appdb-only. The probes below ran on our
+PoC's full multi-store topology, so the findings apply directly to
+the actual MVP scope. The "AppDB-only" framing in earlier sections
+of this doc is retained for historical context but the conclusions
+generalize — concurrent-operations risks during appdb snapshot/restore
+exist regardless of whether `s3-meta` and `oplog-meta` live in the
+same RS as appdb or separately. The new docs/runbook items added here
+apply equally to both topologies.
 
 The existing PoC docs in this directory cover the cross-store skew
 scenarios (`RESTORE-FINDINGS.md` S1/S2/S3), the validator fix that
@@ -159,6 +170,22 @@ To get an answer to the underlying question (**"what does bgrid do when it sees 
 | `Couldn't find incomplete snapshot` WARN | 10:22:45.652Z | bgrid's "clean up any orphan in-progress before starting fresh" path is in place — it tries to delete stragglers; ours was already gone (`removed: 1` is a different doc from the same cleanup) |
 
 **Outcome: ⚠️ PASS-with-significant-caveat.** bgrid recovers automatically WHEN the stale lock is cleared, but **does NOT automatically detect or clear a stale lock**.
+
+#### Probe A — validation of the injection method
+
+A fair concern: the artificial injection of `workingOn=true` (boolean) doesn't match exactly what bgrid writes during a real snapshot. Code inspection clarifies what's faithful vs. what's not:
+
+| Aspect | Real bgrid state during snapshot | Probe A's injection | Faithful for our observation? |
+|---|---|---|---|
+| `workingOn` field type | sub-document `{machine: {...}, integrityCheck: bool, ...}` (per `BackupStatus.getWorkingOn()` returning `DBObject`) | boolean `true` | ✅ Faithful for the gate test (`workingOn: false` query excludes both) |
+| Upstream queries (`ImplicitJobDaoV2.java:405,1176`, `RestoreJobDao.java:204,224`, etc.) | filter `workingOn: false` to find pollable jobs | filter excludes our doc | ✅ Same exclusion behavior |
+| Downstream call sites (e.g., `getWorkingOnMachine()`) | would unmarshal sub-doc into `DaemonMachine` | would fail on type-cast if reached | ❌ Different — but never reached because the upstream filter skips our doc entirely |
+
+**Conclusion:** the **primary observable** (bgrid stops polling the job) is faithfully reproduced by the injection. The launch-readiness conclusion — "stale workingOn lock → silent backup-pause until manual cleanup" — stands.
+
+**Other state-machine effects** (e.g., what bgrid would do if some OTHER code path DID encounter the workingOn doc) might differ from real mid-flight behavior. We've documented the recovery path that matters; any second-order effects are out of scope for this probe.
+
+**Attempt to validate via real workflow (failed):** we also tried `POST /api/public/v1.0/groups/{gid}/clusters/{cid}/snapshots/onDemandSnapshot` to trigger a REAL customer snapshot, but the call returned `HTTP 500 UNEXPECTED_ERROR` on both Primary OM (poRepSet) and Meta OM (appdb-rs). The same root cause as the earlier `WTCheckpointResource` 500 we saw — the locally-built dev agent doesn't successfully handle the WT checkpoint cursor description request. This is a PoC environment limitation, not a v8.0 backport defect. Driving the UI via Playwright would hit the same broken code path.
 
 #### Probe A — failure-mode characterization (the launch-readiness answer)
 
@@ -394,6 +421,15 @@ real data sits.
 2. **MUST**: appdb restore should be followed by an OM restart so the in-memory published config matches the rolled-back state. Without restart, OM and appdb diverge until the next natural publish.
 3. **SHOULD**: post-restore, the operator should check `backupjobs.jobs` for any documents with `workingOn=true` whose `state.startedAt` is older than 5 minutes. If found, run the cleanup runbook below — bgrid will silently skip polling these jobs otherwise.
 4. **SHOULD**: PR #770 (v8.0.23+ and main) is mandatory for AppDB-only — otherwise a mid-groom appdb restore can leave snapshots in the index that reference physically-deleted blocks, and restoring those snapshots will wipe customer data without warning.
+
+## Follow-up engineering tickets (file under the OM Backup epic; not launch blockers)
+
+| ID | Title | Estimated effort | Notes |
+|---|---|---|---|
+| FU-CONC-1 | bgrid: detect stale `workingOn=true` locks via `state.startedAt` age check | ~15 LOC in `WTCheckpointScheduleSvc` | If `workingOn=true` AND `state.startedAt` is older than `2 × poll_interval` (≈ 2 minutes), clear the lock and emit `WARN`. Removes Probe A's silent-pause failure mode. |
+| FU-CONC-2 | bgrid: WARN on orphan `backupjobs.snapshots` docs with `completed=false` older than 1 hour | ~5 LOC in any periodic check | Gives monitoring something to alert on for the Probe-A failure mode. |
+| FU-CONC-3 | restoration-mode reconciliation: include "clear stale workingOn locks" as part of the recovery procedure | ~10 LOC in `ReconciliationOrchestrator.doReconcile` | Closes the gap fully — restoration mode triggers automatic recovery from Probe-A state too. |
+| FU-CONC-4 | Customer-facing doc: "Recovering an Ops Manager AppDB after restore" runbook | Doc, no code | Mandatory pre-launch artifact. Includes the mongosh runbook below + the "MUST restart OM after appdb restore" guidance. |
 
 ### Recovery runbook for the Probe-A failure mode (mandatory inclusion in launch docs)
 
