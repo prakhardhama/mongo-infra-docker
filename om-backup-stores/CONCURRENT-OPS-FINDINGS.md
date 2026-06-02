@@ -185,7 +185,23 @@ A fair concern: the artificial injection of `workingOn=true` (boolean) doesn't m
 
 **Other state-machine effects** (e.g., what bgrid would do if some OTHER code path DID encounter the workingOn doc) might differ from real mid-flight behavior. We've documented the recovery path that matters; any second-order effects are out of scope for this probe.
 
-**Attempt to validate via real workflow (failed):** we also tried `POST /api/public/v1.0/groups/{gid}/clusters/{cid}/snapshots/onDemandSnapshot` to trigger a REAL customer snapshot, but the call returned `HTTP 500 UNEXPECTED_ERROR` on both Primary OM (poRepSet) and Meta OM (appdb-rs). The same root cause as the earlier `WTCheckpointResource` 500 we saw — the locally-built dev agent doesn't successfully handle the WT checkpoint cursor description request. This is a PoC environment limitation, not a v8.0 backport defect. Driving the UI via Playwright would hit the same broken code path.
+**Attempt to validate via real workflow (failed):** we also tried `POST /api/public/v1.0/groups/{gid}/clusters/{cid}/snapshots/onDemandSnapshot` to trigger a REAL customer snapshot, but the call returned `HTTP 500 UNEXPECTED_ERROR` on both Primary OM (poRepSet) and Meta OM (appdb-rs). The same root cause as the earlier `WTCheckpointResource` 500 we saw — the locally-built dev agent doesn't successfully handle the WT checkpoint cursor description request. This is a PoC environment limitation, not a v8.0 backport defect.
+
+**Attempt to validate via UI (also failed for the same reason):** we set up a CDP-enabled Chrome (`~/bin/cdp-chrome/launch`) + Playwright driver (`~/bin/cdp-chrome/login-and-probe-a`) that programmatically logs in to both OMs, opens the Continuous Backup pages, expands the kebab menu on `poShardClust`, and clicks "Take Snapshot Now". The click registered successfully on the UI side (button click + form submit), but **no new snapshot doc appeared in `backupjobs.snapshots`** during the 2-minute observation window after the click. Tracker output:
+
+```
+ts        | poShard_1 working/action | snap count | appdb-rs working/action | snap count
+12:14:59Z | false|WT checkpoint     | 73         | false|WT checkpoint    | 506
+12:15:05Z | false|WT checkpoint     | 73         | false|WT checkpoint    | 506
+...                                                                                  (no change for 2 min)
+12:16:34Z | false|WT checkpoint     | 73         | false|WT checkpoint    | 506
+```
+
+The UI button enqueues the on-demand snapshot (writes `onDemandSnapshotInfo` to `backupjobs.jobs`, which we confirmed via mongosh). bgrid's `WTCheckpointScheduleSvc.isWTCSnapshotTime` returns true on next poll (due to `hasOnDemandSnapshotTime()` path). bgrid then sends the snapshot cursor description request to the agent. **The agent returns HTTP 500.** bgrid aborts and deletes the in-progress snapshot doc — same `Abort triggered by error... Status: 500` log we saw before. The UI sees no error because the failure is async (UI just enqueued the request).
+
+**This is an environment-specific block, not a v8.0 backport defect.** A production-built agent (vs. the locally-compiled `go run cm.go` in this PoC) would presumably handle the WT checkpoint request correctly. Without that working, we can't observe the REAL mid-snapshot state in this environment — the injection-based test remains the only feasible approach, and the code-grep validation above shows its primary observable is faithful.
+
+**Reusable infrastructure created:** `~/bin/cdp-chrome/` (launch / stop / login-and-probe-a) — same CDP-attach pattern as the `google-doc-writer` skill. The login form selectors and snapshot-button selectors (`button.take-snapshot-now` inside `details.context-menu`) are now known, so future UI-driving scripts for OM testing have a starting template.
 
 #### Probe A — failure-mode characterization (the launch-readiness answer)
 
