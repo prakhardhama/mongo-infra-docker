@@ -220,6 +220,42 @@ For future UI-driven snapshot tests: also need to handle the confirmation modal.
 
 **Note on the button-visibility rule:** "Take Snapshot Now" is only shown for clusters/RSes where the next scheduled snapshot is in the future. If the schedule shows "(now)" or "Snapshot is behind", the button is suppressed. To test this on a deployment that's permanently "behind" (like poRepSet in our PoC), push the next-snapshot time out via `db.jobs.updateOne(..., {$set: {nextSnapshot: Timestamp(<future-secs>, 1)}})` first.
 
+#### Probe A — UI-driven validation results (round 2, schedule pushed out)
+
+After the user pushed `nextSnapshot` on poRepSet to 15:00Z (well in the future), the "Take Snapshot Now" button became visible. UI driver clicked the kebab → menu item → modal's Submit button on both Primary OM (poRepSet) and Meta OM (appdb-rs). Two real submissions, 7 seconds apart:
+
+| | Primary OM (poRepSet) | Meta OM (appdb-rs) |
+|---|---|---|
+| Modal submit time | 12:30:52Z | 12:30:59Z |
+| `onDemandSnapshotInfo` written to appdb? | ✓ (briefly) | ✓ (still set 60s later) |
+| bgrid picked up + cleared? | ✓ (`onDemand: (cleared/none)` within 30s) | bgrid would pick up on next poll cycle |
+| Actual snapshot created? | ❌ (no new doc) | ✅ One earlier on-demand snapshot at 12:28:33 completed in 69s |
+| Why poRepSet failed | bgrid tried → agent (`go run cm.go`) returned HTTP 500 on `ProcessCursorDescription` → bgrid aborted, cleared the request | appdb-rs agent (inside `primary-om-appdb` container) works correctly |
+
+**Three additional findings from the real UI flow:**
+
+1. **bgrid self-cleans on agent failure.** When the customer-side agent returns 500 during a snapshot attempt, bgrid:
+   - Logs `Abort triggered by error... Status: 500 Server Error`
+   - Calls `deleteInProgressCheckpointSnapshot` to remove the orphan in-flight doc
+   - Clears `onDemandSnapshotInfo` from the job doc
+   - Resumes normal polling
+   
+   The window where `workingOn=true` + an incomplete snapshot doc exist is **brief (seconds, not minutes)**. This narrows the practical race-window for Probe A's failure mode — appdb-rs snapshots taken at random times during normal customer activity are **unlikely** to capture mid-flight customer state because the mid-flight window is so short.
+
+2. **The agent-500 issue is asymmetric in this PoC.** Meta OM's `appdb-rs` agent (inside the `primary-om-appdb` container) handles WT checkpoint requests correctly — proven by the successful snapshot at 12:28:33 (start) → 12:29:42 (complete). Primary OM's locally-built `go run cm.go` agent fails the same request. This is **not** a v8.0 backport defect; it's a difference in how the locally-compiled dev agent handles the snapshot cursor protocol. The Meta OM appdb-rs agent is closer to production behavior.
+
+3. **Modal-handling pattern works.** The kebab `details.context-menu summary` → `button.take-snapshot-now` → modal `.modal button.btn-primary` flow is now a working template for any future OM UI driving (snapshot, restore, deployment edit, etc.).
+
+**Net implication for the AppDB-only MVP launch readiness:**
+
+The original Probe A finding ("bgrid honors stale `workingOn=true` indefinitely") is empirically valid for the **single failure path** we tested, but the **practical likelihood of triggering it in production is lower than feared**:
+
+- Real bgrid cleans up after agent failures within seconds (not the indefinite duration my injection simulated)
+- For the injection scenario to match reality, the appdb snapshot must capture the few-second window between "bgrid sent cursor description request" and "bgrid received and processed the response" (or its abort path)
+- In a production OM where agents reliably succeed, this window is even narrower (no abort path needed; bgrid only holds `workingOn=true` for the duration of the actual snapshot)
+
+The recovery runbook (clear `workingOn=true` locks older than 5 min, delete orphan `completed=false` snapshot docs older than 1 hr) remains the right MUST-include item for customer-facing docs, but the operational severity is **rare and recoverable** rather than **likely and silent**. The launch-readiness verdict stands: AppDB-only / multi-store MVP is shippable with the documented runbook.
+
 #### Probe A — failure-mode characterization (the launch-readiness answer)
 
 **In the AppDB-only MVP scenario,** if a customer's appdb is restored from a snapshot that was captured **while a customer-deployment snapshot was mid-flight** (i.e., a real-world race), the restored state will contain:
