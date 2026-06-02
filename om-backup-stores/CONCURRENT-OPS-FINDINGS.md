@@ -187,7 +187,11 @@ A fair concern: the artificial injection of `workingOn=true` (boolean) doesn't m
 
 **Attempt to validate via real workflow (failed):** we also tried `POST /api/public/v1.0/groups/{gid}/clusters/{cid}/snapshots/onDemandSnapshot` to trigger a REAL customer snapshot, but the call returned `HTTP 500 UNEXPECTED_ERROR` on both Primary OM (poRepSet) and Meta OM (appdb-rs). The same root cause as the earlier `WTCheckpointResource` 500 we saw — the locally-built dev agent doesn't successfully handle the WT checkpoint cursor description request. This is a PoC environment limitation, not a v8.0 backport defect.
 
-**Attempt to validate via UI (also failed for the same reason):** we set up a CDP-enabled Chrome (`~/bin/cdp-chrome/launch`) + Playwright driver (`~/bin/cdp-chrome/login-and-probe-a`) that programmatically logs in to both OMs, opens the Continuous Backup pages, expands the kebab menu on `poShardClust`, and clicks "Take Snapshot Now". The click registered successfully on the UI side (button click + form submit), but **no new snapshot doc appeared in `backupjobs.snapshots`** during the 2-minute observation window after the click. Tracker output:
+**Attempt to validate via UI (two layers of issues, both useful learnings):** we set up a CDP-enabled Chrome (`~/bin/cdp-chrome/launch`) + Playwright driver (`~/bin/cdp-chrome/login-and-probe-a`) that programmatically logs in to both OMs and opens the Continuous Backup pages.
+
+**Layer 1 — UI-level understanding (poRepSet has no "Take Snapshot Now"):** the button is **hidden when the next scheduled snapshot is already overdue or in-flight** (the "Snapshot is behind" indicator). For poRepSet, the scheduler has been continuously trying to snapshot (and failing at the agent 500), so it's always "behind" → the manual button is suppressed because clicking would be redundant. To get the button to appear on poRepSet, you'd need to push the next scheduled snapshot well into the future (e.g., 1 hour out) so the scheduler isn't in "trying right now" state.
+
+**Layer 2 — even after clicking on poShardClust, the snapshot didn't fire:** the OM UI's "Take Snapshot Now" button has `data-open-form="take-snapshot-now"` — it just **opens a confirmation modal**. Clicking the kebab button itself doesn't submit the request; you also have to click the modal's Submit button. My driver only clicked the first button, so nothing actually got written to `onDemandSnapshotInfo` and bgrid never tried to snapshot. Tracker output confirms — no state change on either side:
 
 ```
 ts        | poShard_1 working/action | snap count | appdb-rs working/action | snap count
@@ -197,11 +201,24 @@ ts        | poShard_1 working/action | snap count | appdb-rs working/action | sn
 12:16:34Z | false|WT checkpoint     | 73         | false|WT checkpoint    | 506
 ```
 
-The UI button enqueues the on-demand snapshot (writes `onDemandSnapshotInfo` to `backupjobs.jobs`, which we confirmed via mongosh). bgrid's `WTCheckpointScheduleSvc.isWTCSnapshotTime` returns true on next poll (due to `hasOnDemandSnapshotTime()` path). bgrid then sends the snapshot cursor description request to the agent. **The agent returns HTTP 500.** bgrid aborts and deletes the in-progress snapshot doc — same `Abort triggered by error... Status: 500` log we saw before. The UI sees no error because the failure is async (UI just enqueued the request).
+The intended flow IS: UI button → modal Submit → enqueues `onDemandSnapshotInfo` to `backupjobs.jobs` → bgrid's `WTCheckpointScheduleSvc.isWTCSnapshotTime` returns true on next poll (due to `hasOnDemandSnapshotTime()` path) → bgrid sends the snapshot cursor description request to the agent → **agent returns HTTP 500** (as we observed via the earlier `nextSnapshot` bump test) → bgrid aborts and deletes the in-progress snapshot doc. Even WITH the modal submitted, this is where it fails in our PoC.
 
 **This is an environment-specific block, not a v8.0 backport defect.** A production-built agent (vs. the locally-compiled `go run cm.go` in this PoC) would presumably handle the WT checkpoint request correctly. Without that working, we can't observe the REAL mid-snapshot state in this environment — the injection-based test remains the only feasible approach, and the code-grep validation above shows its primary observable is faithful.
 
-**Reusable infrastructure created:** `~/bin/cdp-chrome/` (launch / stop / login-and-probe-a) — same CDP-attach pattern as the `google-doc-writer` skill. The login form selectors and snapshot-button selectors (`button.take-snapshot-now` inside `details.context-menu`) are now known, so future UI-driving scripts for OM testing have a starting template.
+**Reusable infrastructure created:** `~/bin/cdp-chrome/` (launch / stop / login-and-probe-a) — same CDP-attach pattern as the `google-doc-writer` skill. Selectors learned for future OM UI driving:
+
+| Element | Selector |
+|---|---|
+| Username field on login | `input[name="username"]` |
+| Password field | `input[name="password"]` |
+| Login submit | `button:has-text("Login")` |
+| Kebab in row (e.g., "poShardClust") | `tr:has-text("poShardClust") details.context-menu summary` |
+| "Take Snapshot Now" item (opens modal) | `tr:has-text("poShardClust") button.take-snapshot-now` |
+| Modal Submit button | (TBD — script doesn't handle this layer yet; would need to inspect the modal's structure) |
+
+For future UI-driven snapshot tests: also need to handle the confirmation modal. The selector pattern is likely `[role="dialog"] button:has-text("Take Snapshot")` or similar — to be inspected on next run.
+
+**Note on the button-visibility rule:** "Take Snapshot Now" is only shown for clusters/RSes where the next scheduled snapshot is in the future. If the schedule shows "(now)" or "Snapshot is behind", the button is suppressed. To test this on a deployment that's permanently "behind" (like poRepSet in our PoC), push the next-snapshot time out via `db.jobs.updateOne(..., {$set: {nextSnapshot: Timestamp(<future-secs>, 1)}})` first.
 
 #### Probe A — failure-mode characterization (the launch-readiness answer)
 
